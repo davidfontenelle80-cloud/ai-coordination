@@ -1,6 +1,6 @@
 ---
 id: 009
-title: Realtime fanout + API + rate limits
+title: HTTP command + query API
 state: pending
 owner: —
 created: 2026-09-29
@@ -9,13 +9,44 @@ updated: 2026-09-29
 
 ## Goal
 
-One Durable Object with hibernating WebSockets for event fanout (notifies
-event_id/task_id/type/seq; clients fetch the record). REST/JSON commands
-for the 9 event types. Per-agent rate limits to protect the free quota.
-Mechanical prechecks (shape only) on result.submitted before Mateo's queue.
+Authenticated HTTP API — the hub must work fully over plain HTTP/polling
+before any realtime is added. **Domain commands, not event creation**:
+createTask, claimTask, startTask, blockTask, postMessage, submitResult,
+recordReview, requestDecision, resolveDecision, postHandoff, attachArtifact,
+setAgentStatus. The server validates, authorizes, and decides which events
+each command generates (e.g. recordReview accepted → review.recorded +
+task.changed → completed, atomically).
 
-Blocked on: 007.
+Read endpoints (core, not optional): GET /tasks, /tasks/{id},
+/tasks/{id}/events?after_seq=, /tasks/{id}/resume, /activity,
+/decisions?state=pending, /agents. The resume packet (goal, state,
+assignment, latest accepted decisions, latest relevant messages,
+latest result/review, open blocker, artifact refs, current version) is what
+lets a replacement session recover after context loss.
+
+Simple rate protection: max request-body size, reasonable command ceiling,
+burst protection, 429 response, logging of who hit the limit. No fancy
+distributed limiter.
+
+Mechanical prechecks on submitResult (shape only: required fields, valid
+links, version match) before Mateo's queue.
+
+**Stable error contract** (defined here, before Codex consumes the API):
+AUTH_REQUIRED, FORBIDDEN, VERSION_CONFLICT, TASK_ALREADY_CLAIMED,
+INVALID_TRANSITION, VALIDATION_FAILED, RATE_LIMITED, NOT_FOUND — each with
+error_code, message, current_task_version, retryable where applicable.
+
+Blocked on: 007, 008.
+
+## Phase tests (must pass before 010 starts)
+
+- Deterministic 409 VERSION_CONFLICT on stale writes.
+- Deterministic 401/403 on bad/missing/insufficient auth.
+- Malformed command writes no event.
+- Accepted command produces exactly the expected event(s).
 
 ## Events
 
-- 2026-09-29: Created by Mateo.
+- 2026-09-29: Created by Mateo. Split from old 009 per ChatGPT's accepted
+  review (was "realtime/API" depending only on 007; now HTTP API depending
+  on 007 + 008, realtime moved to 013).
