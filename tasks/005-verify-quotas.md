@@ -1,7 +1,7 @@
 ---
 id: 005
 title: Verify Cloudflare free-tier quotas
-state: in-progress
+state: completed
 owner: Mateo
 created: 2026-09-29
 updated: 2026-09-29
@@ -18,3 +18,7 @@ whether Zero Trust onboarding requires payment details), R2 overage model
 ## Events
 
 - 2026-09-29: Created by Mateo. Verification running.
+- 2026-09-29: Verification complete — report at
+  `hub/docs/quota-verification-2026-09-29.md`. All proposal numbers confirmed
+  against current docs. Key delta: Zero Trust onboarding REQUIRES a payment
+  method (not "may") — auth fallback is now mandatory, not optional.

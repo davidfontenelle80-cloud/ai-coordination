@@ -16,6 +16,17 @@ user ID), per-agent 256-bit bearer tokens, hashes only in D1, admin
 rotation/revocation endpoint. No card on file without David's explicit
 say-so, ever.
 
+## 2026-09-29 quota-verification finding — fallback is now the PRIMARY path
+
+Quota verification (task 005, report:
+`hub/docs/quota-verification-2026-09-29.md`) confirmed that Zero Trust
+onboarding **requires** a card on file even for the free tier. Decision:
+**do not attempt Cloudflare Access onboarding at all.** Build the fallback
+from the start: GitHub OAuth for David (allowlisted to his GitHub user ID),
+per-agent 256-bit bearer tokens, hashes only in D1, admin
+rotation/revocation endpoint. No card on file, ever, without David's
+explicit say-so.
+
 Blocked on: 007.
 
 ## Events
