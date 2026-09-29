@@ -1,0 +1,16 @@
+# hub v1 — local scaffold (task 007: event core)
+
+# This wrangler.toml is a LOCAL-ONLY scaffold. Task 007 forbids deployment.
+# account_id / database_id are filled in at deploy time (task 012).
+# No secrets live in this repo, ever.
+
+name = "ai-hub"
+main = "worker/src/index.mjs"
+compatibility_date = "2026-09-29"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ai-hub"
+# PLACEHOLDER — replaced at deploy time. Not a real id.
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "db/migrations"

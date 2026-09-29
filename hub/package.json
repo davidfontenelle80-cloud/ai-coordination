@@ -1,0 +1,1 @@
+{"description":"AI coordination hub v1 — event core scaffold (task 007)","engines":{"node":">=22"},"name":"ai-hub","private":true,"scripts":{"test":"node --test worker/test/event-core.test.mjs"},"type":"module","version":"0.1.0"}
