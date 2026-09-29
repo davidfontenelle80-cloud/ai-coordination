@@ -384,3 +384,33 @@ describe('lifecycle + rebuild', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe('workspace-level events', () => {
+  const status = (key, health) => appendEvent(db, {
+    event_type: 'agent.status_changed', actor_id: 'chatgpt', submitted_by: 'chatgpt',
+    idempotency_key: key,
+    payload: { agent_id: 'chatgpt', context_health: health, work_state: 'idle' },
+  }, { now: now() });
+
+  it('sequences multiple task-less events contiguously without throwing', () => {
+    const r1 = status('ws-1', 'normal');
+    const r2 = status('ws-2', 'watch');
+    const r3 = status('ws-3', 'handoff-due');
+    assert.ok(r1.ok && r2.ok && r3.ok);
+    assert.deepEqual([r1.event.seq, r2.event.seq, r3.event.seq], [1, 2, 3]);
+    assert.equal(db.queryOne('SELECT COUNT(*) c FROM events').c, 3);
+  });
+
+  it('workspace events survive the projection rebuild with latest state', () => {
+    status('ws-1', 'normal');
+    status('ws-2', 'handoff-due');
+    const live = db.queryOne('SELECT context_health, work_state FROM agents WHERE agent_id = ?', ['chatgpt']);
+    rebuildProjections(db);
+    const rebuilt = db.queryOne('SELECT context_health, work_state FROM agents WHERE agent_id = ?', ['chatgpt']);
+    assert.deepEqual(rebuilt, live);
+    assert.equal(rebuilt.context_health, 'handoff-due');
+    assert.equal(db.queryOne('SELECT COUNT(*) c FROM events').c, 2);
+  });
+});

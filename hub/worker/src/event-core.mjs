@@ -258,13 +258,6 @@ function taskProjectionStmts(ev) {
           params: [ev.seq, ev.created_at, t] },
       ];
     }
-    case 'result.submitted':
-      return [{
-        sql: `UPDATE tasks SET status = 'under-review', version = ?,
-                     latest_result_event_id = ?, updated_at = ?
-               WHERE task_id = ?`,
-        params: [ev.seq, ev.event_id, ev.created_at, t],
-      }];
     default:
       return [];
   }
@@ -396,6 +389,12 @@ export function appendEvent(db, input, opts = {}) {
     if (taskId) {
       const t = db.queryOne('SELECT version FROM tasks WHERE task_id = ?', [taskId]);
       currentVersion = t ? t.version : 0;
+    } else {
+      // Workspace scope (task_id NULL): sequence from the max seq of
+      // task-less events. Without this every workspace event computed
+      // seq = 1 and the second one died on the UNIQUE(scope, seq) index.
+      const m = db.queryOne('SELECT MAX(seq) AS m FROM events WHERE task_id IS NULL', []);
+      currentVersion = (m && m.m) || 0;
     }
     if (expected !== null && taskId && expected !== currentVersion) {
       return { ok: false, code: 'VERSION_CONFLICT', current_task_version: currentVersion };
@@ -448,7 +447,9 @@ export function appendEvent(db, input, opts = {}) {
         // No expected version: recompute seq and retry once.
         continue;
       }
-      throw err; // workspace-scope race with no idempotency hit: should not happen
+      // Workspace scope: expected_task_version is ignored by design, so a
+      // lost race just recomputes seq and retries once.
+      continue;
     }
   }
   return fail('append failed after retry');
