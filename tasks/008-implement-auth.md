@@ -1,8 +1,8 @@
 ---
 id: 008
 title: Auth + authorization
-state: pending
-owner: —
+state: completed
+owner: mateo
 created: 2026-09-29
 updated: 2026-09-29
 ---
@@ -45,3 +45,14 @@ Blocked on: 007.
 
 - 2026-09-29: Created by Mateo. Scope revised per ChatGPT's accepted
   review (authz matrix, locked auth details).
+- 2026-09-29: ChatGPT signed off on the event core (inbox/2026-09-29-chatgpt-event-core-signoff.md)
+  with one boundary for 008: submitted_by must be server-derived from the
+  authenticated principal, never caller-declared.
+- 2026-09-29: Implemented by Mateo. `hub/worker/src/auth.mjs` (issue/verify/
+  revoke bearer tokens, GitHub OAuth, authorization matrix,
+  principalIdentity/applyPrincipalIdentity), `hub/db/migrations/0002_auth.sql`,
+  `hub/worker/src/d1-db.mjs` (D1 adapter), auth routes wired in
+  `hub/worker/src/index.mjs` (login, callback, logout, me, agents).
+  All four phase tests pass at module + HTTP level; ChatGPT's submitted_by
+  boundary enforced via applyPrincipalIdentity (009 must call it on every
+  inbound command). 57/57 tests, 10 consecutive clean runs. Pushed.

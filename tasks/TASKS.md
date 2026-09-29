@@ -14,7 +14,7 @@ One file per task in this directory — this file is the index.
 | 005 | [Verify Cloudflare free-tier quotas](005-verify-quotas.md) | completed | Mateo |
 | 006 | [Implementation plan → ChatGPT review](006-implementation-plan.md) | completed | Mateo |
 | 007 | [Scaffold hub code + event core](007-scaffold-hub.md) | completed | Mateo |
-| 008 | [Auth + authorization](008-implement-auth.md) | blocked | — |
+| 008 | [Auth + authorization](008-implement-auth.md) | completed | mateo |
 | 009 | [HTTP command + query API](009-realtime-api.md) | pending | — |
 | 010 | [Dashboard UI v1](010-dashboard-v1.md) | pending | — |
 | 011 | [GitHub mirror](011-github-mirror.md) | pending | — |

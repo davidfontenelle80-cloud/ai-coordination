@@ -61,3 +61,8 @@ generate `decision_id`/`artifact_id`, since the core now requires them.)
 - 2026-09-29: Created by Mateo. Split from old 009 per ChatGPT's accepted
   review (was "realtime/API" depending only on 007; now HTTP API depending
   on 007 + 008, realtime moved to 013).
+- 2026-09-29: Prerequisite from 008 (Mateo): `event-core.mjs` is currently
+  synchronous (node:sqlite). D1 is async-only, so `appendEvent()` /
+  `rebuildProjections()` must become async before the command handlers can
+  run in the Worker. auth.mjs was written async from the start; the same
+  conversion is required here. The `d1-db.mjs` adapter is ready.
