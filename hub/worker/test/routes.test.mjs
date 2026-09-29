@@ -180,6 +180,8 @@ describe('auth routes', () => {
 });
 
 describe('task 009 command/query API', () => {
+  let httpKeyTick = 0;
+  // Every mutating command requires a client-supplied idempotency key.
   const post = (body, token) =>
     handler.fetch(new Request('https://hub.example.com/api/commands', {
       method: 'POST',
@@ -187,7 +189,7 @@ describe('task 009 command/query API', () => {
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         'content-type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ idempotency_key: `http-key-${httpKeyTick++}`, ...body }),
     }), env);
 
   async function tokenFor(agent_id, role) {
@@ -276,6 +278,7 @@ describe('task 009 command/query API', () => {
     const authz = { authorization: `Bearer ${gptTok}` };
 
     await post({ command: 'createTask', task_id: 'http_task3', title: 'T', goal: 'G' }, mateoTok);
+    await post({ command: 'claimTask', task_id: 'http_task3' }, gptTok);
     await post({ command: 'requestDecision', task_id: 'http_task3', question: 'Which way?', options: ['a', 'b'] }, gptTok);
     await post({
       command: 'setAgentStatus', context_health: 'normal', work_state: 'working', current_task_id: 'http_task3',
@@ -290,6 +293,19 @@ describe('task 009 command/query API', () => {
 
     const act = await get('/api/activity?limit=5', authz);
     assert.ok((await act.json()).events.length >= 1);
+  });
+
+  it('unexpected errors are 500 INTERNAL_ERROR, never auth failures', async () => {
+    const mateoTok = await tokenFor('mateo', 'mateo');
+    // A malformed percent-encoding makes decodeURIComponent throw URIError —
+    // previously this surfaced as a 401-style auth error, which is
+    // misleading for debugging. (ChatGPT 009 review.)
+    const r = await handler.fetch(new Request('https://hub.example.com/api/tasks/%E0%A4%A', {
+      headers: { authorization: `Bearer ${mateoTok}` },
+    }), env);
+    assert.equal(r.status, 500);
+    const body = await r.json();
+    assert.equal(body.code, 'INTERNAL_ERROR');
   });
 
   it('malformed JSON body is a 400 with a stable code', async () => {

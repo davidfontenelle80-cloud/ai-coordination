@@ -114,12 +114,15 @@ export default {
 
       // -- Command API (task 009) ------------------------------------
       if (path === '/api/commands' && request.method === 'POST') {
-        return handleCommand(request, db);
+        // await (not bare return): async rejections must pass through the
+        // try/catch below, otherwise unexpected errors escape as unhandled
+        // rejections instead of 500s.
+        return await handleCommand(request, db);
       }
 
       // -- Query API (task 009) ----------------------------------------
       if (path.startsWith('/api/') && request.method === 'GET') {
-        return handleQuery(request, db, url);
+        return await handleQuery(request, db, url);
       }
 
       // -- Unknown ------------------------------------------------------
@@ -128,7 +131,14 @@ export default {
         404,
       );
     } catch (e) {
-      return authError(e);
+      // Only KNOWN auth errors map to auth responses. Anything else — a SQL
+      // error, a decode failure, a programming bug — must not masquerade as
+      // an authentication failure. (ChatGPT 009 review.)
+      if (e && typeof e.code === 'string' && e.code.startsWith('AUTH_')) {
+        return authError(e);
+      }
+      console.error('unhandled worker error:', e);
+      return json({ ok: false, code: 'INTERNAL_ERROR', message: 'internal error' }, 500);
     }
   },
 };
@@ -175,7 +185,14 @@ async function handleCommand(request, db) {
 
   let body;
   try {
-    body = await request.json();
+    // Enforce the 1 MiB cap on actual bytes read, not just the header —
+    // a request without Content-Length must not bypass the contract.
+    // (ChatGPT 009 review, minor hardening.)
+    const text = await request.text();
+    if (new TextEncoder().encode(text).length > MAX_COMMAND_BYTES) {
+      return json({ ok: false, code: 'VALIDATION_FAILED', message: 'command body exceeds 1 MiB' }, 400);
+    }
+    body = JSON.parse(text);
   } catch {
     return json({ ok: false, code: 'VALIDATION_FAILED', message: 'JSON body required' }, 400);
   }

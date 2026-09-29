@@ -138,7 +138,7 @@ async function authenticateBearer(db, token, { now }) {
     throw err('AUTH_BAD_TOKEN', 'malformed bearer token');
   }
   const row = await db.queryOne(
-    'SELECT token_id, agent_id, secret_hash, revoked_at FROM agent_tokens WHERE token_id = ?', [tokenId]);
+    'SELECT token_id, agent_id, secret_hash, revoked_at, last_used_at FROM agent_tokens WHERE token_id = ?', [tokenId]);
   if (!row) throw err('AUTH_BAD_TOKEN', 'unknown bearer token');
   if (row.revoked_at) throw err('AUTH_TOKEN_REVOKED', 'bearer token has been revoked');
   const ident = await db.queryOne(
@@ -147,10 +147,16 @@ async function authenticateBearer(db, token, { now }) {
   if (!timingSafeEqual(await sha256Hex(secret), row.secret_hash)) {
     throw err('AUTH_BAD_TOKEN', 'bearer token secret mismatch');
   }
-  await db.batch([{
-    sql: 'UPDATE agent_tokens SET last_used_at = ? WHERE token_id = ?',
-    params: [now, tokenId],
-  }]);
+  // $0 quota: last_used_at is a D1 write on every authenticated request, and
+  // polling reads would burn the 100k/day free write budget on bookkeeping
+  // alone (6 agents x 5s polling ~= 103k writes/day). Only touch it when the
+  // stored value is stale (>10 min) — recency precision is not needed.
+  if (!row.last_used_at || now - row.last_used_at > 10 * 60 * 1000) {
+    await db.batch([{
+      sql: 'UPDATE agent_tokens SET last_used_at = ? WHERE token_id = ?',
+      params: [now, tokenId],
+    }]);
+  }
   return { kind: 'agent', agent_id: ident.agent_id, role: ident.role };
 }
 

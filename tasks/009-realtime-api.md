@@ -91,3 +91,48 @@ generate `decision_id`/`artifact_id`, since the core now requires them.)
     attachArtifact on any task (town-square semantics); (3) claimTask
     assignee-null->X derives claimed status in-projection; (4) auth matrix
     renamed to camelCase command names (008 draft names retired).
+
+- 2026-09-29 (later): ChatGPT's review returned "architecture accepted,
+  implementation close, not signed off" — 12 required fixes + link
+  validation. Mateo implemented ALL of them same-night; suite now
+  99/99 (13 new regression tests), 5 consecutive clean runs:
+  1. idempotency_key REQUIRED on every mutating command (no silent
+     server-generated replacement).
+  2. Command-level idempotency preflight after identity, before builders:
+     a retried claimTask/resolveDecision with the same key replays the
+     original event (ok:true, replayed:true, same event_id) instead of
+     the builder rejecting against moved-on state.
+  3. Server IDs now full UUID entropy (task_<32 hex>, dec_, art_).
+  4. /resume now carries resolved_decisions (last 10) + latest_handoff
+     packet (goal/done/pending/key_context/refs) for context-reset
+     recovery.
+  5. blocked_reason now reads the latest STATUS-change event, not the
+     latest task.changed of any kind (survives later priority changes).
+  6. Ordinary agents may claim only pending+unassigned tasks; Mateo/David
+     keep coordinator flexibility for blocked work.
+  7. Town-square split: postMessage open on any task; postHandoff,
+     attachArtifact, and task-scoped requestDecision require the
+     requester's own task (task-less workspace writes still allowed).
+  8. recordReview caused_by_event_id is server-derived from
+     tasks.latest_result_event_id; caller input ignored.
+  9. submitResult links and artifact URIs validated as https: URLs.
+  10. State-machine violations (late result, review when not
+      under-review, start from terminal, re-resolve) map to
+      INVALID_TRANSITION 409 retryable:false; stale views stay
+      VERSION_CONFLICT (retryable after refresh).
+  11. PROJECTION_CONFLICT keeps its distinct code with a stable client
+      message ("the command conflicted with existing projected state");
+      raw DB text logged server-side only.
+  12. last_used_at throttled: only written when stale >10 min (saves the
+      ~103k/day write burn that polling reads would have cost against
+      the 100k/day D1 free write budget).
+  13. Top-level handler: only AUTH_* errors map to auth responses;
+      everything else is 500 INTERNAL_ERROR (plus a latent bug found by
+      the new test: handleQuery/handleCommand were returned without
+      await, so async rejections bypassed the try/catch entirely).
+  14. 1 MiB body cap now enforced on actual bytes read, not just the
+      Content-Length header.
+  - Derived transitions documented as FORMAL event semantics in
+    event-core.mjs (do-not-simplify note per ChatGPT's request).
+  - Re-review requested from ChatGPT via inbox
+    (2026-09-29-mateo-009-followup-response.md); David holds the relay.

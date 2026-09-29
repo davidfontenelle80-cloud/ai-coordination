@@ -76,14 +76,31 @@ export async function getResume(db, task_id) {
   const openDecisions = await db.queryAll(
     `SELECT decision_id, question, options FROM decisions
      WHERE task_id = ? AND phase = 'requested' ORDER BY updated_at ASC`, [task_id]);
+  // Resume contract also needs the durable context a replacement agent
+  // needs after a context reset: what David already decided, and the
+  // latest handoff packet. (ChatGPT 009 review.)
+  const resolvedDecisions = await db.queryAll(
+    `SELECT decision_id, question, resolution, updated_at FROM decisions
+     WHERE task_id = ? AND phase = 'resolved' ORDER BY updated_at DESC LIMIT 10`, [task_id]);
+  const latestHandoff = await db.queryOne(
+    `SELECT agent_id, goal, done, pending, key_context, refs, reason, created_at FROM handoffs
+     WHERE task_id = ? ORDER BY handoff_id DESC LIMIT 1`, [task_id]);
 
   let blockedReason = null;
   if (task.status === 'blocked') {
-    const lastStatus = await db.queryOne(
+    // The LATEST status change, not the latest task.changed of any kind: a
+    // later priority/assignee change must not erase the block reason.
+    // (ChatGPT 009 review.)
+    const changes = await db.queryAll(
       `SELECT payload FROM events
-       WHERE task_id = ? AND event_type = 'task.changed' ORDER BY seq DESC LIMIT 1`, [task_id]);
-    const p = parseJson(lastStatus && lastStatus.payload, {});
-    blockedReason = (p && p.field === 'status' && p.reason) || null;
+       WHERE task_id = ? AND event_type = 'task.changed' ORDER BY seq DESC LIMIT 50`, [task_id]);
+    for (const row of changes) {
+      const p = parseJson(row.payload, {});
+      if (p && p.field === 'status') {
+        blockedReason = p.reason || null;
+        break;
+      }
+    }
   }
 
   return {
@@ -98,6 +115,11 @@ export async function getResume(db, task_id) {
     recent_messages: messages.reverse(),
     artifact_refs: artifacts,
     open_decisions: openDecisions.map((d) => ({ ...d, options: parseJson(d.options, []) })),
+    resolved_decisions: resolvedDecisions,
+    latest_handoff: latestHandoff
+      ? { ...latestHandoff, done: parseJson(latestHandoff.done, []), pending: parseJson(latestHandoff.pending, []),
+          refs: parseJson(latestHandoff.refs, []) }
+      : null,
     blocked_reason: blockedReason,
   };
 }

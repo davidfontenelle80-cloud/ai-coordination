@@ -20,13 +20,20 @@ const codex = { kind: 'agent', agent_id: 'codex', role: 'agent' };
 
 let db;
 let nowTick;
+let keyTick;
 const now = () => nowTick++;
-const run = (principal, input) => executeCommand(db, principal, input, { now: now() });
+// Every command requires a client-supplied idempotency key (ChatGPT 009
+// review): the helper generates a fresh unique key per call unless the test
+// passes one explicitly.
+const run = (principal, input) =>
+  executeCommand(db, principal,
+    { idempotency_key: `test-key-${keyTick++}`, ...input }, { now: now() });
 
 beforeEach(() => {
   db = openDb(':memory:');
   applySchema(db, SCHEMA);
   nowTick = 1_700_000_000_000;
+  keyTick = 0;
 });
 afterEach(() => { db.close(); });
 
@@ -138,7 +145,9 @@ describe('claim / start / block', () => {
     const t = await makeTask(); // pending
     const r = await run(mateo, { command: 'startTask', task_id: t }); // pending -> in-progress illegal
     assert.equal(r.code, 'INVALID_TRANSITION');
-    assert.equal(r.retryable, true);
+    // A state-machine violation: blindly retrying the identical request can
+    // never succeed, so it is not retryable (ChatGPT 009 review #5).
+    assert.equal(r.retryable, false);
   });
 });
 
@@ -172,10 +181,11 @@ describe('result -> review lifecycle', () => {
     assert.equal(row.status, 'completed');
     assert.equal(row.version, rev.seq);
 
-    // Completed stays terminal: a late result is rejected as invalid
-    // against current state (not retryable — completed is terminal).
+    // Completed stays terminal: a late result is rejected as a
+    // state-machine violation (INVALID_TRANSITION, not retryable —
+    // completed is terminal). (ChatGPT 009 review #5.)
     const late = await run(chatgpt, { command: 'submitResult', task_id: t, summary: 'x' });
-    assert.equal(late.code, 'VALIDATION_FAILED');
+    assert.equal(late.code, 'INVALID_TRANSITION');
     assert.equal(late.retryable, false);
   });
 
@@ -210,12 +220,15 @@ describe('result -> review lifecycle', () => {
 describe('decisions', () => {
   it('anyone may request; only David may resolve', async () => {
     const t = await makeTask();
+    // requestDecision with a task_id requires the requester's own task.
+    await run(chatgpt, { command: 'claimTask', task_id: t });
     const req = await run(chatgpt, {
       command: 'requestDecision', task_id: t, question: 'Ship?', options: ['yes', 'no'],
     });
     assert.equal(req.ok, true);
     const decId = db.queryOne('SELECT decision_id FROM decisions').decision_id;
     assert.match(decId, /^dec_/);
+    assert.match(decId, /^dec_[0-9a-f]{32}$/); // full-entropy IDs
 
     const mRes = await run(mateo, { command: 'resolveDecision', decision_id: decId, resolution: 'yes' });
     assert.equal(mRes.code, 'FORBIDDEN');
@@ -224,8 +237,10 @@ describe('decisions', () => {
     assert.equal(dRes.ok, true);
     assert.equal(db.queryOne('SELECT phase FROM decisions WHERE decision_id = ?', [decId]).phase, 'resolved');
 
+    // Re-resolving is a state-machine violation, not bad input.
     const again = await run(david, { command: 'resolveDecision', decision_id: decId, resolution: 'no' });
-    assert.equal(again.code, 'VALIDATION_FAILED');
+    assert.equal(again.code, 'INVALID_TRANSITION');
+    assert.equal(again.retryable, false);
 
     const missing = await run(david, { command: 'resolveDecision', decision_id: 'dec_nope', resolution: 'x' });
     assert.equal(missing.code, 'NOT_FOUND');
@@ -235,6 +250,9 @@ describe('decisions', () => {
 describe('messages, handoffs, artifacts, status', () => {
   it('posts round-trip and the resume packet carries them', async () => {
     const t = await makeTask();
+    // Handoffs/artifacts on a task require the poster's own task; town-square
+    // messages stay open.
+    await run(chatgpt, { command: 'claimTask', task_id: t });
     await run(chatgpt, { command: 'postMessage', task_id: t, kind: 'proposal', body: 'Plan A' });
     await run(chatgpt, { command: 'postHandoff', task_id: t, goal: 'Wrap', done: ['a'], pending: ['b'] });
     const art = await run(chatgpt, {
@@ -242,15 +260,20 @@ describe('messages, handoffs, artifacts, status', () => {
     });
     assert.equal(art.ok, true);
     const artId = db.queryOne('SELECT artifact_id FROM artifact_refs').artifact_id;
-    assert.match(artId, /^art_/);
+    assert.match(artId, /^art_[0-9a-f]{32}$/); // full-entropy IDs
 
     const resume = await getResume(db, t);
     assert.equal(resume.recent_messages.length, 1);
     assert.equal(resume.recent_messages[0].body, 'Plan A');
     assert.equal(resume.artifact_refs.length, 1);
     assert.equal(resume.artifact_refs[0].name, 'r.md');
-    assert.equal(resume.status, 'pending');
-    assert.equal(resume.version, 4);
+    // The resume packet carries the latest handoff for context-reset recovery.
+    assert.equal(resume.latest_handoff.goal, 'Wrap');
+    assert.deepEqual(resume.latest_handoff.done, ['a']);
+    assert.deepEqual(resume.latest_handoff.pending, ['b']);
+    assert.equal(resume.latest_handoff.agent_id, 'chatgpt');
+    assert.equal(resume.status, 'claimed');
+    assert.equal(resume.version, 5);
   });
 
   it('setAgentStatus forces ordinary agents to their own identity', async () => {
@@ -319,7 +342,7 @@ describe('claim races', () => {
       },
     };
     const r = await executeCommand(racingDb, chatgpt,
-      { command: 'claimTask', task_id: t }, { now: now() });
+      { command: 'claimTask', task_id: t, idempotency_key: 'loser-claim' }, { now: now() });
     assert.equal(r.code, 'TASK_ALREADY_CLAIMED');
     assert.equal(r.retryable, false);
     assert.equal(r.conflicting_assignee, 'codex');
@@ -353,7 +376,7 @@ describe('claim races', () => {
       },
     };
     const r = await executeCommand(racingDb, chatgpt,
-      { command: 'claimTask', task_id: t }, { now: now() });
+      { command: 'claimTask', task_id: t, idempotency_key: 'winner-claim' }, { now: now() });
     assert.equal(r.ok, true);
     const row = db.queryOne('SELECT assignee, priority, version FROM tasks WHERE task_id = ?', [t]);
     assert.equal(row.assignee, 'chatgpt');
@@ -374,5 +397,220 @@ describe('rate limiter', () => {
     assert.equal(rl.check('k', 61_001).ok, true);
     // Other keys are unaffected.
     assert.equal(rl.check('other', 1000).ok, true);
+  });
+});
+// ChatGPT 009 review regression tests — appended for the 009 follow-up pass.
+
+describe('ChatGPT 009 review fixes', () => {
+  it('idempotency_key is required on every mutating command', async () => {
+    const r = await executeCommand(db, mateo,
+      { command: 'createTask', title: 'T', goal: 'G' }, { now: now() });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.match(r.message, /idempotency_key is required/);
+    // Nothing was written.
+    assert.equal(db.queryOne('SELECT COUNT(*) c FROM events').c, 0);
+  });
+
+  it('a retried claimTask with the same key replays the original event', async () => {
+    const t = await makeTask();
+    const first = await run(chatgpt, { command: 'claimTask', task_id: t, idempotency_key: 'claim-k1' });
+    assert.equal(first.ok, true);
+    assert.equal(first.replayed, false);
+    // Without the command-level preflight, the builder would see the task
+    // already assigned and return TASK_ALREADY_CLAIMED — the exact failure
+    // ChatGPT flagged (problem B).
+    const retry = await run(chatgpt, { command: 'claimTask', task_id: t, idempotency_key: 'claim-k1' });
+    assert.equal(retry.ok, true);
+    assert.equal(retry.replayed, true);
+    assert.equal(retry.event_id, first.event_id);
+    assert.equal(retry.seq, first.seq);
+    // No duplicate claim event was written.
+    assert.equal(
+      db.queryOne("SELECT COUNT(*) c FROM events WHERE event_type = 'task.changed' AND actor_id = 'chatgpt'").c, 1);
+  });
+
+  it('a retried resolveDecision with the same key replays the original event', async () => {
+    const t = await makeTask();
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    const req = await run(chatgpt, { command: 'requestDecision', task_id: t, question: 'Ship?' });
+    assert.equal(req.ok, true);
+    const decId = db.queryOne('SELECT decision_id FROM decisions').decision_id;
+    const first = await run(david, { command: 'resolveDecision', decision_id: decId, resolution: 'yes', idempotency_key: 'res-k1' });
+    assert.equal(first.ok, true);
+    // Without the preflight, the builder would see phase=resolved and return
+    // INVALID_TRANSITION — event-core idempotency would never run.
+    const retry = await run(david, { command: 'resolveDecision', decision_id: decId, resolution: 'yes', idempotency_key: 'res-k1' });
+    assert.equal(retry.ok, true);
+    assert.equal(retry.replayed, true);
+    assert.equal(retry.event_id, first.event_id);
+    assert.equal(
+      db.queryOne("SELECT COUNT(*) c FROM events WHERE event_type = 'decision.changed'").c, 2);
+  });
+
+  it('server-generated IDs use full UUID entropy', async () => {
+    const r = await run(mateo, { command: 'createTask', title: 'T', goal: 'G' });
+    assert.equal(r.ok, true);
+    assert.match(r.task_id, /^task_[0-9a-f]{32}$/);
+    const req = await run(mateo, { command: 'requestDecision', question: 'Q?' });
+    assert.equal(req.ok, true);
+    assert.match(db.queryOne('SELECT decision_id FROM decisions').decision_id, /^dec_[0-9a-f]{32}$/);
+  });
+
+  it('ordinary agents may only claim pending tasks; Mateo may claim blocked work', async () => {
+    // Construct an unassigned, blocked task directly through the core
+    // (no command path un-assigns a task — this is defense in depth).
+    const t = 'task_orphan_blocked';
+    const c = await appendEvent(db, {
+      event_type: 'task.created', task_id: t, actor_id: 'mateo', submitted_by: 'mateo',
+      idempotency_key: 'orphan-c', payload: { title: 'T', goal: 'G' },
+    }, { now: now() });
+    assert.equal(c.ok, true);
+    const b = await appendEvent(db, {
+      event_type: 'task.changed', task_id: t, actor_id: 'mateo', submitted_by: 'mateo',
+      idempotency_key: 'orphan-b',
+      payload: { field: 'status', from: 'pending', to: 'blocked', reason: 'x' },
+    }, { now: now() });
+    assert.equal(b.ok, true);
+
+    const gpt = await run(chatgpt, { command: 'claimTask', task_id: t });
+    assert.equal(gpt.ok, false);
+    assert.equal(gpt.code, 'FORBIDDEN');
+    assert.match(gpt.message, /only available on pending tasks/);
+
+    // The coordinator keeps the flexibility to pick up blocked work.
+    const m = await run(mateo, { command: 'claimTask', task_id: t });
+    assert.equal(m.ok, true);
+  });
+
+  it('town-square split: messages are open; handoffs/artifacts/decisions need ownership', async () => {
+    const t = await makeTask();
+    await run(mateo, { command: 'claimTask', task_id: t });
+
+    // postMessage on somebody else's task: allowed (town square).
+    const msg = await run(chatgpt, { command: 'postMessage', task_id: t, kind: 'message', body: 'hey' });
+    assert.equal(msg.ok, true);
+
+    // postHandoff / attachArtifact / requestDecision on somebody else's
+    // task: operational state, not discussion — forbidden.
+    const ho = await run(chatgpt, { command: 'postHandoff', task_id: t, goal: 'g' });
+    assert.equal(ho.code, 'FORBIDDEN');
+    const art = await run(chatgpt, { command: 'attachArtifact', task_id: t, name: 'n', uri: 'https://x/n' });
+    assert.equal(art.code, 'FORBIDDEN');
+    const dec = await run(chatgpt, { command: 'requestDecision', task_id: t, question: 'Q?' });
+    assert.equal(dec.code, 'FORBIDDEN');
+
+    // Task-less writes are the agent's own operational state: allowed.
+    assert.equal((await run(chatgpt, { command: 'postHandoff', goal: 'g' })).ok, true);
+    assert.equal((await run(chatgpt, { command: 'attachArtifact', name: 'n', uri: 'https://x/n' })).ok, true);
+    assert.equal((await run(chatgpt, { command: 'requestDecision', question: 'Q?' })).ok, true);
+
+    // The owner keeps full access to its own task.
+    const own = await makeTask('task_own1');
+    await run(chatgpt, { command: 'claimTask', task_id: own });
+    assert.equal((await run(chatgpt, { command: 'postHandoff', task_id: own, goal: 'g' })).ok, true);
+    assert.equal((await run(chatgpt, { command: 'attachArtifact', task_id: own, name: 'n', uri: 'https://x/n' })).ok, true);
+    assert.equal((await run(chatgpt, { command: 'requestDecision', task_id: own, question: 'Q?' })).ok, true);
+  });
+
+  it('recordReview links to the current result, ignoring caller input', async () => {
+    const t = await makeTask();
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    await run(chatgpt, { command: 'startTask', task_id: t });
+    const sub = await run(chatgpt, { command: 'submitResult', task_id: t, summary: 'Done' });
+    assert.equal(sub.ok, true);
+    // A stale/mistaken caller-supplied event id must not corrupt the trail.
+    const rev = await run(mateo, {
+      command: 'recordReview', task_id: t, outcome: 'accepted', caused_by_event_id: 'evt_stale_bogus',
+    });
+    assert.equal(rev.ok, true);
+    const row = db.queryOne("SELECT caused_by_event_id FROM events WHERE event_type = 'review.recorded'");
+    assert.equal(row.caused_by_event_id, sub.event_id);
+  });
+
+  it('links and artifact URIs must be https: URLs', async () => {
+    const t = await makeTask();
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    await run(chatgpt, { command: 'startTask', task_id: t });
+
+    const badLink = await run(chatgpt, {
+      command: 'submitResult', task_id: t, summary: 'x', links: ['http://example.com/x'],
+    });
+    assert.equal(badLink.code, 'VALIDATION_FAILED');
+    const notUrl = await run(chatgpt, {
+      command: 'submitResult', task_id: t, summary: 'x', links: ['not a url'],
+    });
+    assert.equal(notUrl.code, 'VALIDATION_FAILED');
+    const good = await run(chatgpt, {
+      command: 'submitResult', task_id: t, summary: 'x', links: ['https://example.com/x'],
+    });
+    assert.equal(good.ok, true);
+
+    const badUri = await run(mateo, { command: 'attachArtifact', name: 'n', uri: 'http://x/n' });
+    assert.equal(badUri.code, 'VALIDATION_FAILED');
+  });
+
+  it('state-machine violations map to INVALID_TRANSITION and are not retryable', async () => {
+    const t = await makeTask();
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    await run(chatgpt, { command: 'startTask', task_id: t });
+    // Review while not under-review: the JSON is fine, the state forbids it.
+    const r1 = await run(mateo, { command: 'recordReview', task_id: t, outcome: 'accepted' });
+    assert.equal(r1.code, 'INVALID_TRANSITION');
+    assert.equal(r1.retryable, false);
+
+    // Drive the task to completed, then startTask from a terminal state.
+    await run(chatgpt, { command: 'submitResult', task_id: t, summary: 'x' });
+    await run(mateo, { command: 'recordReview', task_id: t, outcome: 'accepted' });
+    const r2 = await run(chatgpt, { command: 'startTask', task_id: t });
+    assert.equal(r2.code, 'INVALID_TRANSITION');
+    assert.equal(r2.retryable, false);
+  });
+
+  it('PROJECTION_CONFLICT uses a stable client message, not raw DB text', async () => {
+    await run(mateo, { command: 'createTask', task_id: 'task_dup9', title: 'T', goal: 'G' });
+    const r = await run(mateo, {
+      command: 'createTask', task_id: 'task_dup9', title: 'T2', goal: 'G2',
+      idempotency_key: 'dup-key-different',
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'PROJECTION_CONFLICT');
+    assert.equal(r.message, 'the command conflicted with existing projected state');
+    assert.equal(r.retryable, false);
+  });
+
+  it('resume carries resolved decisions, the latest handoff, and a durable blocked reason', async () => {
+    const t = await makeTask('task_resume9');
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    await run(chatgpt, {
+      command: 'postHandoff', task_id: t, goal: 'Wrap up', done: ['a'], pending: ['b'], key_context: 'ctx',
+    });
+    const req = await run(chatgpt, { command: 'requestDecision', task_id: t, question: 'Ship?' });
+    assert.equal(req.ok, true);
+    const decId = db.queryOne('SELECT decision_id FROM decisions WHERE task_id = ?', [t]).decision_id;
+    await run(david, { command: 'resolveDecision', decision_id: decId, resolution: 'yes, ship it' });
+
+    // Block the task, then change something unrelated (priority) directly —
+    // the blocked reason must survive the later non-status event.
+    await run(chatgpt, { command: 'startTask', task_id: t });
+    const blk = await run(chatgpt, { command: 'blockTask', task_id: t, reason: 'waiting on David' });
+    assert.equal(blk.ok, true);
+    const pri = await appendEvent(db, {
+      event_type: 'task.changed', task_id: t, actor_id: 'mateo', submitted_by: 'mateo',
+      idempotency_key: 'pri-9', payload: { field: 'priority', from: 'normal', to: 'high' },
+    }, { now: now() });
+    assert.equal(pri.ok, true);
+
+    const resume = await getResume(db, t);
+    assert.equal(resume.blocked_reason, 'waiting on David');
+    assert.equal(resume.open_decisions.length, 0);
+    assert.equal(resume.resolved_decisions.length, 1);
+    assert.equal(resume.resolved_decisions[0].decision_id, decId);
+    assert.equal(resume.resolved_decisions[0].resolution, 'yes, ship it');
+    assert.equal(resume.latest_handoff.goal, 'Wrap up');
+    assert.equal(resume.latest_handoff.agent_id, 'chatgpt');
+    assert.deepEqual(resume.latest_handoff.done, ['a']);
+    assert.deepEqual(resume.latest_handoff.pending, ['b']);
+    assert.equal(resume.latest_handoff.key_context, 'ctx');
   });
 });

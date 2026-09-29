@@ -51,7 +51,7 @@ function isOrdinaryAgent(principal) {
 async function getTaskRow(db, task_id) {
   if (!nonEmptyString(task_id)) throw cmdErr('VALIDATION_FAILED', 'task_id is required');
   const row = await db.queryOne(
-    'SELECT task_id, status, assignee, version FROM tasks WHERE task_id = ?', [task_id]);
+    'SELECT task_id, status, assignee, version, latest_result_event_id FROM tasks WHERE task_id = ?', [task_id]);
   if (!row) throw cmdErr('NOT_FOUND', `task ${task_id} does not exist`);
   return row;
 }
@@ -69,6 +69,23 @@ function uuid() {
   return crypto.randomUUID();
 }
 
+// Full-entropy server IDs: never truncate UUIDs. These become durable
+// references (ChatGPT 009 review), so 32-bit prefixes are not acceptable.
+function genId(prefix) {
+  return `${prefix}_${uuid().replace(/-/g, '')}`;
+}
+
+// v1 link policy: https: only. Anything else is rejected at the command
+// boundary (submitResult links, artifact URIs).
+function httpsUrl(v) {
+  if (typeof v !== 'string') return false;
+  try {
+    return new URL(v).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Command -> event builders. Each returns a complete appendEvent() input.
 // Throw cmdErr(VALIDATION_FAILED|FORBIDDEN|NOT_FOUND|TASK_ALREADY_CLAIMED).
@@ -79,7 +96,7 @@ async function buildCreateTask(db, input, ident) {
   if (!nonEmptyString(input.goal)) throw cmdErr('VALIDATION_FAILED', 'createTask requires goal');
   return {
     event_type: 'task.created',
-    task_id: nonEmptyString(input.task_id) ? input.task_id : `task_${uuid().slice(0, 8)}`,
+    task_id: nonEmptyString(input.task_id) ? input.task_id : genId('task'),
     payload: {
       title: input.title,
       goal: input.goal,
@@ -103,6 +120,12 @@ async function buildClaimTask(db, input, ident, principal) {
   if (task.assignee !== null && task.assignee !== undefined) {
     throw cmdErr('TASK_ALREADY_CLAIMED', `task ${task.task_id} is already claimed by ${task.assignee}`,
       { current_task_version: task.version });
+  }
+  // Ordinary agents may only claim genuinely claimable work: a pending,
+  // unassigned task. Claiming completed/under-review/blocked work is a
+  // coordinator (Mateo/David) action, not self-claim. (ChatGPT 009 review.)
+  if (isOrdinaryAgent(principal) && task.status !== 'pending') {
+    throw cmdErr('FORBIDDEN', `claimTask is only available on pending tasks; task ${task.task_id} is ${task.status}`);
   }
   return {
     event_type: 'task.changed',
@@ -150,6 +173,16 @@ async function buildSubmitResult(db, input, ident, principal) {
   const task = await getTaskRow(db, input.task_id);
   requireAssigned(principal, task, 'submitResult');
   if (!nonEmptyString(input.summary)) throw cmdErr('VALIDATION_FAILED', 'submitResult requires summary');
+  if (input.links !== undefined) {
+    if (!Array.isArray(input.links)) throw cmdErr('VALIDATION_FAILED', 'submitResult links must be an array');
+    // Promised link validation: every entry must be an https: URL.
+    // (ChatGPT 009 review.)
+    for (const link of input.links) {
+      if (!httpsUrl(link)) {
+        throw cmdErr('VALIDATION_FAILED', 'submitResult links must all be https: URLs');
+      }
+    }
+  }
   return {
     event_type: 'result.submitted',
     task_id: task.task_id,
@@ -166,10 +199,14 @@ async function buildRecordReview(db, input) {
   if (input.outcome !== 'accepted' && input.outcome !== 'rework') {
     throw cmdErr('VALIDATION_FAILED', 'recordReview outcome must be accepted or rework');
   }
+  // Review linkage is server-derived from the task's current result, never
+  // caller-supplied: the server knows which result is under review, so an
+  // accidental stale event id cannot corrupt the audit trail.
+  // (ChatGPT 009 review.)
   return {
     event_type: 'review.recorded',
     task_id: task.task_id,
-    ...(nonEmptyString(input.caused_by_event_id) ? { caused_by_event_id: input.caused_by_event_id } : {}),
+    ...(task.latest_result_event_id ? { caused_by_event_id: task.latest_result_event_id } : {}),
     payload: {
       outcome: input.outcome,
       ...(input.notes !== undefined && input.notes !== null ? { notes: input.notes } : {}),
@@ -177,14 +214,19 @@ async function buildRecordReview(db, input) {
   };
 }
 
-async function buildRequestDecision(db, input) {
-  if (input.task_id) await getTaskRow(db, input.task_id);
+async function buildRequestDecision(db, input, ident, principal) {
+  if (input.task_id) {
+    const task = await getTaskRow(db, input.task_id);
+    // An ordinary agent requests David decisions from a task it owns —
+    // it must not inject decisions into somebody else's task.
+    requireAssigned(principal, task, 'requestDecision');
+  }
   if (!nonEmptyString(input.question)) throw cmdErr('VALIDATION_FAILED', 'requestDecision requires question');
   return {
     event_type: 'decision.changed',
     ...(input.task_id ? { task_id: input.task_id } : {}),
     payload: {
-      decision_id: `dec_${uuid().slice(0, 8)}`,
+      decision_id: genId('dec'),
       phase: 'requested',
       question: input.question,
       ...(input.options !== undefined ? { options: input.options } : {}),
@@ -199,7 +241,7 @@ async function buildResolveDecision(db, input) {
     'SELECT decision_id, task_id, phase FROM decisions WHERE decision_id = ?', [input.decision_id]);
   if (!row) throw cmdErr('NOT_FOUND', `decision ${input.decision_id} does not exist`);
   if (row.phase !== 'requested') {
-    throw cmdErr('VALIDATION_FAILED', `decision ${input.decision_id} is already ${row.phase}`);
+    throw cmdErr('INVALID_TRANSITION', `decision ${input.decision_id} is already ${row.phase}`);
   }
   return {
     event_type: 'decision.changed',
@@ -209,7 +251,13 @@ async function buildResolveDecision(db, input) {
 }
 
 async function buildPostHandoff(db, input, ident, principal) {
-  if (input.task_id) await getTaskRow(db, input.task_id);
+  if (input.task_id) {
+    const task = await getTaskRow(db, input.task_id);
+    // A handoff is operational state, not discussion: ordinary agents may
+    // only file one on a task they own. Cross-task chatter belongs in
+    // postMessage. (ChatGPT 009 review.)
+    requireAssigned(principal, task, 'postHandoff');
+  }
   if (!nonEmptyString(input.goal)) throw cmdErr('VALIDATION_FAILED', 'postHandoff requires goal');
   // A handoff describes the poster's own state: ordinary agents cannot file
   // one as somebody else.
@@ -229,15 +277,23 @@ async function buildPostHandoff(db, input, ident, principal) {
   };
 }
 
-async function buildAttachArtifact(db, input) {
-  if (input.task_id) await getTaskRow(db, input.task_id);
+async function buildAttachArtifact(db, input, ident, principal) {
+  if (input.task_id) {
+    const task = await getTaskRow(db, input.task_id);
+    // Artifacts join the durable task record / resume packet: ordinary
+    // agents may only attach to a task they own. (ChatGPT 009 review.)
+    requireAssigned(principal, task, 'attachArtifact');
+  }
   if (!nonEmptyString(input.name)) throw cmdErr('VALIDATION_FAILED', 'attachArtifact requires name');
   if (!nonEmptyString(input.uri)) throw cmdErr('VALIDATION_FAILED', 'attachArtifact requires uri');
+  if (!httpsUrl(input.uri)) {
+    throw cmdErr('VALIDATION_FAILED', 'attachArtifact requires an https: uri');
+  }
   return {
     event_type: 'artifact.attached',
     ...(input.task_id ? { task_id: input.task_id } : {}),
     payload: {
-      artifact_id: `art_${uuid().slice(0, 8)}`,
+      artifact_id: genId('art'),
       name: input.name,
       uri: input.uri,
       ...(input.mime_type ? { mime_type: input.mime_type } : {}),
@@ -290,7 +346,13 @@ function mapAppendFailure(res, command, task_id) {
     return { ok: false, code: 'VERSION_CONFLICT', message: res.message, retryable: true, ...extra };
   }
   if (res.code === 'PROJECTION_CONFLICT') {
-    return { ok: false, code: 'PROJECTION_CONFLICT', message: res.message, retryable: false, ...extra };
+    // Never expose raw SQLite/D1 constraint text to API clients: the
+    // underlying message is logged server-side for operators instead.
+    // (ChatGPT 009 review.)
+    console.error(`PROJECTION_CONFLICT on ${command}:`, res.message);
+    return { ok: false, code: 'PROJECTION_CONFLICT',
+      message: 'the command conflicted with existing projected state',
+      retryable: false, ...extra };
   }
   if (res.code === 'VALIDATION_FAILED') {
     if (command === 'claimTask' && /from mismatch/i.test(res.message)) {
@@ -303,10 +365,13 @@ function mapAppendFailure(res, command, task_id) {
         retryable: false,
         ...(m ? { conflicting_assignee: JSON.parse(m[1]) } : {}), ...extra };
     }
-    if (/illegal status transition|from mismatch/i.test(res.message)) {
-      return { ok: false, code: 'INVALID_TRANSITION', message: res.message, retryable: true, ...extra };
-    }
-    return { ok: false, code: 'VALIDATION_FAILED', message: res.message, retryable: false, ...extra };
+    // Everything else the core rejects at append time is a state-machine
+    // violation, not bad input: builders already validated input shape, so
+    // the JSON was fine and the task/decision's current state forbids the
+    // operation. Blindly retrying the identical request can never succeed —
+    // retryable:false — while a stale client view surfaces separately as
+    // VERSION_CONFLICT (retryable after refresh). (ChatGPT 009 review #5.)
+    return { ok: false, code: 'INVALID_TRANSITION', message: res.message, retryable: false, ...extra };
   }
   return { ok: false, code: res.code || 'COMMAND_FAILED', message: res.message || 'command failed', retryable: false, ...extra };
 }
@@ -345,6 +410,40 @@ export async function executeCommand(db, principal, rawInput, { now = Date.now()
   const ident = principalIdentity(principal);
   const trusted = { ...input, actor_id: ident.actor_id, submitted_by: ident.submitted_by };
 
+  // Idempotency keys are REQUIRED on every mutating command. A server-
+  // generated replacement would defeat the entire purpose: the client never
+  // received the first key, so it cannot replay it after a lost response.
+  // (ChatGPT 009 review, problem A.)
+  if (!nonEmptyString(input.idempotency_key)) {
+    return {
+      ok: false, code: 'VALIDATION_FAILED',
+      message: 'idempotency_key is required on every mutating command; generate a UUID client-side and reuse it on retry',
+      retryable: false,
+    };
+  }
+
+  // Command-level idempotency preflight: some builders reject retries on
+  // live-state validation (e.g. claimTask sees the task already assigned and
+  // returns TASK_ALREADY_CLAIMED) before the core's idempotency lookup ever
+  // runs. Replay the original committed result first, before any builder.
+  // (ChatGPT 009 review, problem B — blocker.)
+  const prior = await db.queryOne(
+    'SELECT event_id, seq, event_type, task_id FROM events WHERE actor_id = ? AND idempotency_key = ?',
+    [ident.actor_id, input.idempotency_key]);
+  if (prior) {
+    return {
+      ok: true,
+      command,
+      event_id: prior.event_id,
+      seq: prior.seq,
+      event_type: prior.event_type,
+      task_id: prior.task_id,
+      version: prior.task_id ? prior.seq : undefined,
+      idempotency_key: input.idempotency_key,
+      replayed: true,
+    };
+  }
+
   let eventInput;
   try {
     eventInput = await BUILDERS[command](db, trusted, ident, principal);
@@ -357,7 +456,7 @@ export async function executeCommand(db, principal, rawInput, { now = Date.now()
 
   eventInput.actor_id = ident.actor_id;
   eventInput.submitted_by = ident.submitted_by;
-  eventInput.idempotency_key = nonEmptyString(input.idempotency_key) ? input.idempotency_key : `cmd_${uuid()}`;
+  eventInput.idempotency_key = input.idempotency_key;
   if (input.expected_task_version !== undefined) {
     eventInput.expected_task_version = input.expected_task_version;
   }

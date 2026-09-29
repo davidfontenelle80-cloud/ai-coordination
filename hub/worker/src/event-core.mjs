@@ -27,6 +27,19 @@
 //     sequence did not advance -> PROJECTION_CONFLICT, surfaced, not retried.
 //     Stale expected_task_version -> VERSION_CONFLICT.
 //   * Invariant: tasks.version == seq of the last task-scoped event.
+//
+// Derived transitions (FORMAL semantics — do not "simplify" these into
+// separate writes; ChatGPT 009 review #1 accepted the one-event design):
+//   * One command appends exactly ONE domain event. Compound lifecycle
+//     transitions are derived deterministically by the projections from
+//     that single event's payload, never committed as separate events.
+//     This makes crash-between-events impossible by construction:
+//       task.changed(field=assignee)  -> projection derives pending -> claimed
+//       result.submitted              -> projection derives in-progress -> under-review
+//       review.recorded(outcome=accepted) -> projection derives under-review -> completed
+//       review.recorded(outcome=rework)   -> projection derives under-review -> in-progress
+//   * The event payload contains everything needed to reproduce the derived
+//     status; replays must reproduce the identical projection state.
 
 import { randomUUID } from 'node:crypto';
 

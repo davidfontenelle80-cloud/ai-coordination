@@ -84,6 +84,21 @@ describe('bearer tokens', () => {
     assert.ok(after >= before);
   });
 
+  it('throttles last_used_at writes to protect the free D1 write quota', async () => {
+    const { token } = await issueAgent('mateo', 'mateo');
+    const t0 = 1_700_000_100_000;
+    const authz = { authorization: `Bearer ${token}` };
+    await authenticate(db, req(authz), { now: t0 });
+    const stamped = db.queryOne('SELECT last_used_at FROM agent_tokens').last_used_at;
+    assert.equal(stamped, t0);
+    // A request 1 minute later: timestamp is fresh, no write.
+    await authenticate(db, req(authz), { now: t0 + 60_000 });
+    assert.equal(db.queryOne('SELECT last_used_at FROM agent_tokens').last_used_at, t0);
+    // A request 11 minutes later: stale, one write.
+    await authenticate(db, req(authz), { now: t0 + 11 * 60_000 });
+    assert.equal(db.queryOne('SELECT last_used_at FROM agent_tokens').last_used_at, t0 + 11 * 60_000);
+  });
+
   it('rejects a wrong bearer token', async () => {
     await issueAgent();
     await assert.rejects(
