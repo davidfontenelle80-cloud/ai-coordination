@@ -15,7 +15,10 @@
 //   * Static validation, then the idempotency lookup — BEFORE any
 //     state-dependent validation, so retries of committed commands replay
 //     instead of failing against moved-on state.
-//   * Read phase: current version read, seq computation.
+//   * Read phase (per attempt): current version read, stale expected version
+//     -> VERSION_CONFLICT, then state-dependent validation against the
+//     freshly-read state. A retry after a lost race revalidates; it never
+//     commits against assumptions a rival commit invalidated.
 //   * Write phase: ONE atomic batch [INSERT event, projection statements].
 //   * The UNIQUE(COALESCE(task_id,''), seq) constraint makes the batch fail
 //     atomically when a concurrent writer committed first. On failure we
@@ -491,7 +494,10 @@ function validateAgainstState(db, input, taskId) {
  * state-dependent validation. A retry of an already-committed command
  * returns the original event even when re-validating it against current
  * state would fail (e.g. repeating a status change that already moved the
- * task). Only static input validation runs before the lookup.
+ * task). Only static input validation runs before the lookup. Within the
+ * retry loop, state-dependent validation re-runs on every attempt against
+ * that attempt's freshly-read state, so a retry after a lost race cannot
+ * commit against assumptions a rival commit invalidated.
  */
 export function appendEvent(db, input, opts = {}) {
   const v = validateEvent(input);
@@ -508,25 +514,33 @@ export function appendEvent(db, input, opts = {}) {
     [input.actor_id, input.idempotency_key]);
   if (preExisting) return { ok: true, event: rowToEvent(preExisting), replayed: true };
 
-  // Fast-path concurrency check: a stale expected version can never
-  // succeed, so report it before any other state-dependent validation.
-  // (This also keeps concurrent losers on VERSION_CONFLICT deterministically
-  // instead of sometimes tripping the from-match check after a commit.)
-  const preVersion = readVersion(db, taskId);
-  if (expected !== null && taskId && expected !== preVersion) {
-    return { ok: false, code: 'VERSION_CONFLICT', current_task_version: preVersion };
-  }
-
-  // State-dependent validation (needs the live projections).
-  const stateErr = validateAgainstState(db, input, taskId);
-  if (stateErr) return stateErr;
-
   for (let attempt = 0; attempt < MAX_APPEND_ATTEMPTS; attempt++) {
     // ---- read phase (no locks held) ----
     const currentVersion = readVersion(db, taskId);
+    // Fast-path concurrency check: a stale expected version can never
+    // succeed, so report it before validation. This keeps concurrent losers
+    // deterministically on VERSION_CONFLICT instead of sometimes tripping
+    // the from-match check after a rival commit.
     if (expected !== null && taskId && expected !== currentVersion) {
       return { ok: false, code: 'VERSION_CONFLICT', current_task_version: currentVersion };
     }
+    // State-dependent validation runs on EVERY attempt, against this
+    // attempt's state. After a lost race the world may have moved: a retry
+    // must not commit against the assumptions of its original validation
+    // (e.g. a result gate or a `from` value a rival commit invalidated).
+    // Callers without expected_task_version are allowed, but each of their
+    // retries is validated against the state it actually follows.
+    const stateErr = validateAgainstState(db, input, taskId);
+    if (stateErr) {
+      // A rival commit may have landed between this attempt's version read
+      // and validation, making a merely-stale read look like an invalid
+      // request (e.g. a from-mismatch). If the version moved, retry instead:
+      // the next attempt's version check then reports VERSION_CONFLICT
+      // deterministically for stale expected versions.
+      if (taskId && readVersion(db, taskId) !== currentVersion) continue;
+      return stateErr;
+    }
+
     const seq = currentVersion + 1;
 
     const event = {

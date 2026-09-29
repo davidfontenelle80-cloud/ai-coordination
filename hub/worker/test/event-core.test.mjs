@@ -763,3 +763,130 @@ describe('value validation', () => {
     assert.equal(db.queryOne('SELECT COUNT(*) c FROM events').c, 1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Lost-race revalidation (ChatGPT review #2, task 014)
+// ---------------------------------------------------------------------------
+
+// Deterministic lost-race harness: on the first batch() call, runs
+// `sabotage` (a rival commit) against the real DB first, so the outer
+// append genuinely loses the sequence race — no threads, no timing.
+function makeRacyDb(db, sabotage) {
+  let armed = true;
+  return {
+    queryOne: (...a) => db.queryOne(...a),
+    queryAll: (...a) => db.queryAll(...a),
+    batch: (stmts) => {
+      if (armed) {
+        armed = false;
+        sabotage(db);
+      }
+      return db.batch(stmts);
+    },
+  };
+}
+
+describe('lost-race revalidation', () => {
+  it('revalidates the result gate after losing a sequence race', () => {
+    const c = createTask({ key: 'rr-create', task_id: 'task_racer' });
+    const t = c.event.task_id;
+    for (const [k, from, to, ver] of [
+      ['rr-claim', 'pending', 'claimed', 1],
+      ['rr-start', 'claimed', 'in-progress', 2],
+    ]) {
+      const r = appendEvent(db, {
+        event_type: 'task.changed', actor_id: 'm', submitted_by: 'm',
+        idempotency_key: k, task_id: t, expected_task_version: ver,
+        payload: { field: 'status', from, to, reason: 'x' },
+      }, { now: now() });
+      assert.equal(r.ok, true);
+    }
+
+    const racyDb = makeRacyDb(db, (realDb) => {
+      // Rival commit: in-progress -> blocked (takes seq 4).
+      const b = appendEvent(realDb, {
+        event_type: 'task.changed', actor_id: 'b', submitted_by: 'b',
+        idempotency_key: 'rr-block', task_id: t,
+        payload: { field: 'status', from: 'in-progress', to: 'blocked', reason: 'rival' },
+      }, { now: now() });
+      assert.equal(b.ok, true);
+    });
+
+    // No expected_task_version: the retry must revalidate, not blindly follow.
+    const r = appendEvent(racyDb, {
+      event_type: 'result.submitted', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'rr-result', task_id: t,
+      payload: { summary: 'stale assumptions' },
+    }, { now: now() });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.match(r.message, /in-progress/);
+    assert.equal(db.queryOne('SELECT status FROM tasks WHERE task_id = ?', [t]).status, 'blocked');
+    assert.equal(
+      db.queryOne("SELECT COUNT(*) c FROM events WHERE event_type = 'result.submitted'").c, 0);
+  });
+
+  it('revalidates task.changed from after losing a sequence race', () => {
+    const c = createTask({ key: 'rf-create', task_id: 'task_racefrom' });
+    const t = c.event.task_id;
+
+    const racyDb = makeRacyDb(db, (realDb) => {
+      // Rival commit: assignee null -> codex (takes seq 2).
+      const b = appendEvent(realDb, {
+        event_type: 'task.changed', actor_id: 'b', submitted_by: 'b',
+        idempotency_key: 'rf-rival', task_id: t,
+        payload: { field: 'assignee', to: 'codex', reason: 'rival' },
+      }, { now: now() });
+      assert.equal(b.ok, true);
+    });
+
+    const r = appendEvent(racyDb, {
+      event_type: 'task.changed', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'rf-a', task_id: t,
+      payload: { field: 'assignee', from: null, to: 'chatgpt', reason: 'stale' },
+    }, { now: now() });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.match(r.message, /from mismatch/);
+    assert.equal(db.queryOne('SELECT assignee FROM tasks WHERE task_id = ?', [t]).assignee, 'codex');
+  });
+});
+
+describe('stale-read determinism', () => {
+  it('a rival commit between version read and validation still reports VERSION_CONFLICT', () => {
+    const c = createTask({ key: 'sr-create', task_id: 'task_staleread' });
+    const t = c.event.task_id;
+
+    // Sabotage on the 2nd 'FROM tasks' read: #1 is this attempt's version
+    // read, #2 is validateAgainstState's state read. The rival commit lands
+    // between them, so validation observes newer state than the version check.
+    let tasksReads = 0;
+    let armed = true;
+    const trickyDb = {
+      queryOne: (sql, params) => {
+        if (armed && /FROM tasks/.test(sql) && ++tasksReads === 2) {
+          armed = false;
+          const b = appendEvent(db, {
+            event_type: 'task.changed', actor_id: 'b', submitted_by: 'b',
+            idempotency_key: 'sr-rival', task_id: t,
+            payload: { field: 'assignee', to: 'rival', reason: 'rival' },
+          }, { now: now() });
+          assert.equal(b.ok, true);
+        }
+        return db.queryOne(sql, params);
+      },
+      queryAll: (...a) => db.queryAll(...a),
+      batch: (stmts) => db.batch(stmts),
+    };
+
+    const r = appendEvent(trickyDb, {
+      event_type: 'task.changed', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'sr-a', task_id: t, expected_task_version: 1,
+      payload: { field: 'assignee', from: null, to: 'a', reason: 'stale read' },
+    }, { now: now() });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'VERSION_CONFLICT');
+    assert.equal(r.current_task_version, 2);
+    assert.equal(db.queryOne('SELECT assignee FROM tasks WHERE task_id = ?', [t]).assignee, 'rival');
+  });
+});
