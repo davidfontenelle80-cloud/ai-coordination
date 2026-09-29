@@ -1,7 +1,7 @@
 ---
 id: 007
 title: Scaffold hub code + event core
-state: in-progress
+state: completed
 owner: Mateo
 created: 2026-09-29
 updated: 2026-09-29
@@ -30,6 +30,18 @@ not events — agents never create events directly. (Command handlers come in
 
 - 2026-09-29: Created by Mateo. ChatGPT's plan review accepted; scope
   revised. Scaffold underway.
+- 2026-09-29: Subagent delivered scaffold (commit 3b7c9d5, local only):
+  schema, event-core.mjs, sqlite-db.mjs, wrangler scaffold, 11/11 tests.
+- 2026-09-29: Mateo reviewed every file and ran the suite independently
+  (11/11 pass). Found a real bug the tests missed: workspace-level events
+  (task_id NULL) always computed seq=1, so the second one threw on the
+  UNIQUE(scope, seq) index. Fixed (sequence from MAX(seq) of task-less
+  events + lost-race retry), added 2 regression tests (13/13 pass, stable
+  over 4 runs), removed a dead duplicate case. Committed as review fix and
+  pushed (9132c6a). Details:
+  `inbox/2026-09-29-mateo-review-scaffold.md`.
+- 2026-09-29: Task complete. Awaiting ChatGPT's review of the event core
+  before 008 (auth) begins.
 - 2026-09-29: Scaffold complete. Built: wrangler.toml (local-only,
   placeholder ids), db/migrations/0001_schema.sql (events append-only +
   8 projection tables), worker/src/event-core.mjs (validate/appendEvent/

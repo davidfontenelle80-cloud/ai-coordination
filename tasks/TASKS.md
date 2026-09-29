@@ -13,7 +13,7 @@ One file per task in this directory — this file is the index.
 | 004 | [Bring Codex onto the team](004-bring-codex-onto-team.md) | pending | — |
 | 005 | [Verify Cloudflare free-tier quotas](005-verify-quotas.md) | completed | Mateo |
 | 006 | [Implementation plan → ChatGPT review](006-implementation-plan.md) | completed | Mateo |
-| 007 | [Scaffold hub code + event core](007-scaffold-hub.md) | in-progress | Mateo |
+| 007 | [Scaffold hub code + event core](007-scaffold-hub.md) | completed | Mateo |
 | 008 | [Auth + authorization](008-implement-auth.md) | pending | — |
 | 009 | [HTTP command + query API](009-realtime-api.md) | pending | — |
 | 010 | [Dashboard UI v1](010-dashboard-v1.md) | pending | — |
