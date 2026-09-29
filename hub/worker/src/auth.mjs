@@ -170,25 +170,33 @@ async function authenticateSession(db, sessionId, { now }) {
 
 // Command names are the 009 API surface. David can do everything; the sets
 // below name what each agent role may do. Anything unlisted is denied.
+// (009 renamed the 008 draft names — e.g. task.claim -> claimTask — and
+// folded task.assign into claimTask's assignee option; the semantics are
+// unchanged. Flagged for ChatGPT's 009 review.)
 const MATEO_COMMANDS = new Set([
-  'task.create', 'task.assign', 'task.update', 'task.complete',
-  'task.claim', 'task.changeStatus',
-  'result.submit', 'review.record',
-  'decision.request', 'message.post', 'handoff.post', 'artifact.attach',
-  'agent.status', 'agent.issue', 'agent.revoke',
+  'createTask',
+  'claimTask',
+  'startTask', 'blockTask',
+  'postMessage',
+  'submitResult', 'recordReview',
+  'requestDecision',
+  'postHandoff', 'attachArtifact',
+  'setAgentStatus',
+  'agent.issue', 'agent.revoke',
 ]);
 
 const AGENT_COMMANDS = new Set([
-  'task.claim',            // self-claim of unassigned tasks only (009 enforces)
-  'result.submit',         // own in-progress tasks only (009 enforces)
-  'decision.request',      // request only — resolution is David-only
-  'message.post', 'handoff.post', 'artifact.attach',
-  'agent.status',          // own status only (009 enforces)
+  'claimTask',             // self-claim of unassigned tasks only (009 enforces)
+  'startTask', 'blockTask',// own assigned tasks only (009 enforces)
+  'submitResult',          // own in-progress tasks only (009 enforces)
+  'requestDecision',       // request only — resolution is David-only
+  'postMessage', 'postHandoff', 'attachArtifact',
+  'setAgentStatus',        // own status only (009 enforces)
 ]);
 
 // David-only: consequential decisions and overrides. An authenticated agent
 // token must never reach these, and Mateo may not impersonate them.
-const DAVID_ONLY_COMMANDS = new Set(['decision.resolve', 'task.override']);
+const DAVID_ONLY_COMMANDS = new Set(['resolveDecision']);
 
 export function authorize(principal, command) {
   if (!principal) return false;

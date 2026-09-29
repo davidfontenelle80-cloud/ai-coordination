@@ -133,33 +133,33 @@ describe('authorization matrix', () => {
   const agent = { kind: 'agent', agent_id: 'chatgpt', role: 'agent' };
 
   it('agent cannot perform a Mateo action (review.record)', () => {
-    assert.equal(authorize(agent, 'review.record'), false);
-    assert.equal(authorize(agent, 'task.create'), false);
+    assert.equal(authorize(agent, 'recordReview'), false);
+    assert.equal(authorize(agent, 'createTask'), false);
     assert.equal(authorize(agent, 'agent.issue'), false);
   });
 
   it('agent can do agent actions', () => {
-    for (const c of ['task.claim', 'result.submit', 'message.post', 'handoff.post', 'artifact.attach', 'agent.status', 'decision.request']) {
+    for (const c of ['claimTask', 'startTask', 'blockTask', 'submitResult', 'postMessage', 'postHandoff', 'attachArtifact', 'setAgentStatus', 'requestDecision']) {
       assert.equal(authorize(agent, c), true, c);
     }
   });
 
   it('Mateo cannot impersonate a David decision', () => {
-    assert.equal(authorize(mateo, 'decision.resolve'), false);
-    assert.equal(authorize(mateo, 'task.override'), false);
-    assert.equal(authorize(mateo, 'review.record'), true);
-    assert.equal(authorize(mateo, 'task.create'), true);
+    assert.equal(authorize(mateo, 'resolveDecision'), false);
+    assert.equal(authorize(mateo, 'taskOverride'), false);
+    assert.equal(authorize(mateo, 'recordReview'), true);
+    assert.equal(authorize(mateo, 'createTask'), true);
   });
 
   it('David can do everything, including overrides', () => {
-    for (const c of ['decision.resolve', 'task.override', 'review.record', 'task.claim', 'agent.issue', 'anything.unlisted']) {
+    for (const c of ['resolveDecision', 'taskOverride', 'recordReview', 'claimTask', 'agent.issue', 'anything.unlisted']) {
       assert.equal(authorize(david, c), true, c);
     }
   });
 
   it('denies unauthenticated and unknown principals', () => {
-    assert.equal(authorize(null, 'message.post'), false);
-    assert.equal(authorize({ kind: 'weird' }, 'message.post'), false);
+    assert.equal(authorize(null, 'postMessage'), false);
+    assert.equal(authorize({ kind: 'weird' }, 'postMessage'), false);
   });
 });
 
@@ -173,7 +173,7 @@ describe('server-derived identity (ChatGPT 008 boundary)', () => {
 
     // A bearer token can never mint provenance as another principal:
     // caller-supplied values are overwritten.
-    const inbound = { command: 'review.record', actor_id: 'mateo', submitted_by: 'mateo', payload: {} };
+    const inbound = { command: 'recordReview', actor_id: 'mateo', submitted_by: 'mateo', payload: {} };
     const out = applyPrincipalIdentity(inbound, agent);
     assert.equal(out.actor_id, 'chatgpt');
     assert.equal(out.submitted_by, 'chatgpt');

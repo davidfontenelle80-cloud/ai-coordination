@@ -261,7 +261,19 @@ function taskProjectionStmts(ev) {
     }
     case 'task.changed': {
       const p = ev.payload;
-      const col = { status: 'status', assignee: 'assignee', priority: 'priority',
+      // Claiming derives the status: assigning an owner to a pending task
+      // moves it to claimed in the same write (009 compound decision —
+      // derived, never a second event).
+      if (p.field === 'assignee') {
+        return [{
+          sql: `UPDATE tasks SET assignee = ?,
+                       status = CASE WHEN assignee IS NULL AND status = 'pending' AND ? IS NOT NULL
+                                     THEN 'claimed' ELSE status END,
+                       version = ?, updated_at = ? WHERE task_id = ?`,
+          params: [p.to, p.to, ev.seq, ev.created_at, t],
+        }];
+      }
+      const col = { status: 'status', priority: 'priority',
                     deadline: 'deadline', title: 'title' }[p.field];
       // `deadline` is stored on the tasks row; add the column lazily-safe via
       // COALESCE-free direct reference (column exists in schema v1).
@@ -277,12 +289,19 @@ function taskProjectionStmts(ev) {
                WHERE task_id = ?`,
         params: [ev.seq, ev.event_id, ev.created_at, t],
       }];
-    case 'review.recorded':
+    case 'review.recorded': {
+      // The review decision drives the status machine directly (like
+      // result.submitted -> under-review): accepted completes the task,
+      // rework sends it back to in-progress. One command appends exactly
+      // one event — the transition is derived, never a second write, so
+      // recordReview is atomic by construction (009 compound decision).
+      const next = ev.payload.outcome === 'accepted' ? 'completed' : 'in-progress';
       return [{
-        sql: `UPDATE tasks SET version = ?, latest_review_event_id = ?, updated_at = ?
+        sql: `UPDATE tasks SET status = ?, version = ?, latest_review_event_id = ?, updated_at = ?
                WHERE task_id = ?`,
-        params: [ev.seq, ev.event_id, ev.created_at, t],
+        params: [next, ev.seq, ev.event_id, ev.created_at, t],
       }];
+    }
     case 'message.posted': {
       const p = ev.payload;
       return [
@@ -418,12 +437,12 @@ const MAX_APPEND_ATTEMPTS = 8;
 // event in a scope advances exactly one of these, which is what lets the
 // write-phase failure handler distinguish a genuine race (retry) from a
 // projection conflict (surface the error).
-function readVersion(db, taskId) {
+async function readVersion(db, taskId) {
   if (taskId) {
-    const t = db.queryOne('SELECT version FROM tasks WHERE task_id = ?', [taskId]);
+    const t = await db.queryOne('SELECT version FROM tasks WHERE task_id = ?', [taskId]);
     return t ? t.version : 0;
   }
-  const m = db.queryOne('SELECT MAX(seq) AS m FROM events WHERE task_id IS NULL', []);
+  const m = await db.queryOne('SELECT MAX(seq) AS m FROM events WHERE task_id IS NULL', []);
   return (m && m.m) || 0;
 }
 
@@ -433,13 +452,13 @@ const TASK_FIELD_COLUMNS = { status: 'status', assignee: 'assignee', priority: '
 // State-dependent validation: everything that needs the live projections.
 // Runs AFTER the idempotency lookup, so a retry of a committed command is
 // never re-validated against state that moved on.
-function validateAgainstState(db, input, taskId) {
+async function validateAgainstState(db, input, taskId) {
   const t = input.event_type;
   const p = input.payload;
 
   let taskRow = null;
   if (taskId) {
-    taskRow = db.queryOne(
+    taskRow = await db.queryOne(
       'SELECT status, version, title, assignee, priority, deadline FROM tasks WHERE task_id = ?',
       [taskId]);
     if (!taskRow && t !== 'task.created') return fail(`task ${taskId} does not exist`);
@@ -499,7 +518,7 @@ function validateAgainstState(db, input, taskId) {
  * that attempt's freshly-read state, so a retry after a lost race cannot
  * commit against assumptions a rival commit invalidated.
  */
-export function appendEvent(db, input, opts = {}) {
+export async function appendEvent(db, input, opts = {}) {
   const v = validateEvent(input);
   if (!v.ok) return v;
 
@@ -509,14 +528,14 @@ export function appendEvent(db, input, opts = {}) {
 
   // Idempotency first: never re-validate a committed command against
   // state that has moved on since it was accepted.
-  const preExisting = db.queryOne(
+  const preExisting = await db.queryOne(
     'SELECT * FROM events WHERE actor_id = ? AND idempotency_key = ?',
     [input.actor_id, input.idempotency_key]);
   if (preExisting) return { ok: true, event: rowToEvent(preExisting), replayed: true };
 
   for (let attempt = 0; attempt < MAX_APPEND_ATTEMPTS; attempt++) {
     // ---- read phase (no locks held) ----
-    const currentVersion = readVersion(db, taskId);
+    const currentVersion = await readVersion(db, taskId);
     // Fast-path concurrency check: a stale expected version can never
     // succeed, so report it before validation. This keeps concurrent losers
     // deterministically on VERSION_CONFLICT instead of sometimes tripping
@@ -530,14 +549,14 @@ export function appendEvent(db, input, opts = {}) {
     // (e.g. a result gate or a `from` value a rival commit invalidated).
     // Callers without expected_task_version are allowed, but each of their
     // retries is validated against the state it actually follows.
-    const stateErr = validateAgainstState(db, input, taskId);
+    const stateErr = await validateAgainstState(db, input, taskId);
     if (stateErr) {
       // A rival commit may have landed between this attempt's version read
       // and validation, making a merely-stale read look like an invalid
       // request (e.g. a from-mismatch). If the version moved, retry instead:
       // the next attempt's version check then reports VERSION_CONFLICT
       // deterministically for stale expected versions.
-      if (taskId && readVersion(db, taskId) !== currentVersion) continue;
+      if (taskId && await readVersion(db, taskId) !== currentVersion) continue;
       return stateErr;
     }
 
@@ -570,14 +589,14 @@ export function appendEvent(db, input, opts = {}) {
 
     // ---- write phase: single atomic batch (the linearization point) ----
     try {
-      db.batch(stmts);
+      await db.batch(stmts);
       return { ok: true, event };
     } catch (err) {
       if (!isConstraintViolation(err)) throw err;
       // Lost a race (or hit a projection conflict). Re-check idempotency
       // first: a concurrent identical retry means we return the existing
       // event, not an error.
-      const dup = db.queryOne(
+      const dup = await db.queryOne(
         'SELECT * FROM events WHERE actor_id = ? AND idempotency_key = ?',
         [input.actor_id, input.idempotency_key]);
       if (dup) return { ok: true, event: rowToEvent(dup), replayed: true };
@@ -586,7 +605,7 @@ export function appendEvent(db, input, opts = {}) {
       // bumps MAX(seq) over task-less events, so an advance means a genuine
       // concurrent commit (worth one retry); no advance means the batch
       // failed on a projection constraint, not a race.
-      const cur = readVersion(db, taskId);
+      const cur = await readVersion(db, taskId);
       if (taskId && expected !== null && expected !== cur) {
         return { ok: false, code: 'VERSION_CONFLICT', current_task_version: cur };
       }
@@ -610,17 +629,17 @@ export function appendEvent(db, input, opts = {}) {
  * and the operator must re-run. Do not expose this as a routine production
  * operation without shadow projections or another recovery strategy.
  */
-export function rebuildProjections(db, opts = {}) {
+export async function rebuildProjections(db, opts = {}) {
   const chunk = opts.chunkSize ?? 100;
   const drop = PROJECTION_TABLES.map((t) => ({ sql: `DELETE FROM ${t}`, params: [] }));
-  db.batch(drop);
-  const events = db.queryAll('SELECT * FROM events ORDER BY rowid', []);
+  await db.batch(drop);
+  const events = await db.queryAll('SELECT * FROM events ORDER BY rowid', []);
   for (let i = 0; i < events.length; i += chunk) {
     const stmts = [];
     for (const row of events.slice(i, i + chunk)) {
       stmts.push(...applyProjection(rowToEvent(row)));
     }
-    if (stmts.length) db.batch(stmts);
+    if (stmts.length) await db.batch(stmts);
   }
   return { rebuilt_events: events.length };
 }

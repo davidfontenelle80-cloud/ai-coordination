@@ -170,8 +170,136 @@ describe('auth routes', () => {
     assert.equal(me.status, 401);
   });
 
-  it('unknown routes still 501 for task 009', async () => {
-    const r = await get('/api/tasks');
-    assert.equal(r.status, 501);
+  it('unknown routes are 404 with a stable error body', async () => {
+    const setCookie = await loginAsDavid();
+    const sessionId = /^hub_session=([^;]+)/.exec(setCookie)[1];
+    const r = await get('/api/nope', { cookie: `hub_session=${sessionId}` });
+    assert.equal(r.status, 404);
+    assert.equal((await r.json()).code, 'NOT_FOUND');
+  });
+});
+
+describe('task 009 command/query API', () => {
+  const post = (body, token) =>
+    handler.fetch(new Request('https://hub.example.com/api/commands', {
+      method: 'POST',
+      headers: {
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    }), env);
+
+  async function tokenFor(agent_id, role) {
+    const { issueAgentToken } = await import('../src/auth.mjs');
+    const { token } = await issueAgentToken(
+      { queryOne: (s, p) => db.queryOne(s, p), queryAll: (s, p) => db.queryAll(s, p),
+        batch: (stmts) => db.batch(stmts) },
+      { agent_id, display_name: agent_id, role }, { by: 'david' });
+    return token;
+  }
+
+  it('unauthenticated command and query calls are 401', async () => {
+    const c = await post({ command: 'createTask', title: 'T', goal: 'G' });
+    assert.equal(c.status, 401);
+    assert.equal((await c.json()).code, 'AUTH_REQUIRED');
+    const q = await get('/api/tasks');
+    assert.equal(q.status, 401);
+  });
+
+  it('full task lifecycle over HTTP', async () => {
+    const mateoTok = await tokenFor('mateo', 'mateo');
+    const gptTok = await tokenFor('chatgpt', 'agent');
+
+    // Ordinary agents cannot create tasks.
+    const denied = await post({ command: 'createTask', title: 'T', goal: 'G' }, gptTok);
+    assert.equal(denied.status, 403);
+    assert.equal((await denied.json()).code, 'FORBIDDEN');
+
+    const created = await post({ command: 'createTask', task_id: 'http_task1', title: 'HTTP task', goal: 'Prove the API' }, mateoTok);
+    assert.equal(created.status, 200);
+    const createdBody = await created.json();
+    assert.equal(createdBody.ok, true);
+    assert.equal(createdBody.task_id, 'http_task1');
+
+    assert.equal((await post({ command: 'claimTask', task_id: 'http_task1' }, gptTok)).status, 200);
+    assert.equal((await post({ command: 'startTask', task_id: 'http_task1' }, gptTok)).status, 200);
+    const sub = await post({ command: 'submitResult', task_id: 'http_task1', summary: 'Done via HTTP' }, gptTok);
+    assert.equal(sub.status, 200);
+    const rev = await post({ command: 'recordReview', task_id: 'http_task1', outcome: 'accepted' }, mateoTok);
+    assert.equal(rev.status, 200);
+
+    // Query: single task.
+    const one = await get('/api/tasks/http_task1', { authorization: `Bearer ${gptTok}` });
+    assert.equal(one.status, 200);
+    assert.equal((await one.json()).task.status, 'completed');
+
+    // Query: task list with filter.
+    const list = await get('/api/tasks?status=completed', { authorization: `Bearer ${gptTok}` });
+    assert.equal((await list.json()).tasks.length, 1);
+
+    // Query: events after a seq cursor.
+    const evs = await get('/api/tasks/http_task1/events?after_seq=3', { authorization: `Bearer ${gptTok}` });
+    const evsBody = await evs.json();
+    assert.ok(evsBody.events.length >= 2);
+    assert.ok(evsBody.events.every((e) => e.seq > 3));
+    assert.equal(evsBody.events[0].payload.summary, 'Done via HTTP');
+
+    // Query: resume packet.
+    const resume = await get('/api/tasks/http_task1/resume', { authorization: `Bearer ${gptTok}` });
+    const resumeBody = await resume.json();
+    assert.equal(resumeBody.resume.status, 'completed');
+    assert.equal(resumeBody.resume.latest_result.summary, 'Done via HTTP');
+    assert.equal(resumeBody.resume.latest_review.outcome, 'accepted');
+
+    // Query: unknown task is 404.
+    const missing = await get('/api/tasks/nope', { authorization: `Bearer ${gptTok}` });
+    assert.equal(missing.status, 404);
+  });
+
+  it('version conflicts surface as 409 with the live version', async () => {
+    const mateoTok = await tokenFor('mateo', 'mateo');
+    const gptTok = await tokenFor('chatgpt', 'agent');
+    await post({ command: 'createTask', task_id: 'http_task2', title: 'T', goal: 'G' }, mateoTok);
+    await post({ command: 'claimTask', task_id: 'http_task2' }, gptTok);
+    const r = await post({ command: 'startTask', task_id: 'http_task2', expected_task_version: 1 }, gptTok);
+    assert.equal(r.status, 409);
+    const body = await r.json();
+    assert.equal(body.code, 'VERSION_CONFLICT');
+    assert.equal(body.current_task_version, 2);
+    assert.equal(body.retryable, true);
+  });
+
+  it('decisions, agents, and activity queries', async () => {
+    const mateoTok = await tokenFor('mateo', 'mateo');
+    const gptTok = await tokenFor('chatgpt', 'agent');
+    const authz = { authorization: `Bearer ${gptTok}` };
+
+    await post({ command: 'createTask', task_id: 'http_task3', title: 'T', goal: 'G' }, mateoTok);
+    await post({ command: 'requestDecision', task_id: 'http_task3', question: 'Which way?', options: ['a', 'b'] }, gptTok);
+    await post({
+      command: 'setAgentStatus', context_health: 'normal', work_state: 'working', current_task_id: 'http_task3',
+    }, gptTok);
+
+    const decs = await get('/api/decisions?state=requested', authz);
+    assert.equal((await decs.json()).decisions.length, 1);
+
+    const agents = await get('/api/agents', authz);
+    const agentsBody = await agents.json();
+    assert.equal(agentsBody.agents.find((a) => a.agent_id === 'chatgpt').work_state, 'working');
+
+    const act = await get('/api/activity?limit=5', authz);
+    assert.ok((await act.json()).events.length >= 1);
+  });
+
+  it('malformed JSON body is a 400 with a stable code', async () => {
+    const mateoTok = await tokenFor('mateo', 'mateo');
+    const r = await handler.fetch(new Request('https://hub.example.com/api/commands', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${mateoTok}`, 'content-type': 'application/json' },
+      body: '{not json',
+    }), env);
+    assert.equal(r.status, 400);
+    assert.equal((await r.json()).code, 'VALIDATION_FAILED');
   });
 });

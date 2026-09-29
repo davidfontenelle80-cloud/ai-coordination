@@ -8,7 +8,7 @@ const { dbPath, input } = workerData;
 let res;
 const db = openDb(dbPath);
 try {
-  res = appendEvent(db, input);
+  res = await appendEvent(db, input);
 } finally {
   db.close();
 }

@@ -1,7 +1,7 @@
 // index.mjs — Worker entry point.
 //
-// Task 008: auth routes are live. Domain command handlers land in task 009;
-// anything else still returns 501.
+// Task 008: auth routes are live.
+// Task 009: domain command + query API over ordinary HTTP.
 //
 // Routes:
 //   GET  /auth/github/login     -> 302 to GitHub authorize
@@ -10,6 +10,14 @@
 //   GET  /auth/me               -> current principal (or 401)
 //   POST /auth/agents           -> issue agent bearer token (David/Mateo only;
 //                                 plaintext token shown ONCE in the response)
+//   POST /api/commands          -> execute one domain command (auth + rate limit)
+//   GET  /api/tasks            -> list tasks (?status=&assignee=)
+//   GET  /api/tasks/{id}       -> one task
+//   GET  /api/tasks/{id}/events -> task events (?after_seq=)
+//   GET  /api/tasks/{id}/resume -> handoff packet
+//   GET  /api/activity         -> recent events
+//   GET  /api/decisions        -> decisions (?state=requested|resolved)
+//   GET  /api/agents           -> live agent status projection
 //
 // Env: DB (D1), GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET (secrets),
 //      DAVID_GITHUB_ID (numeric), OAUTH_REDIRECT_URI.
@@ -19,6 +27,12 @@ import {
   authenticate, authorize, issueAgentToken,
   beginGitHubLogin, completeGitHubLogin, logout, err,
 } from './auth.mjs';
+import { executeCommand, COMMANDS } from './commands.mjs';
+import { createRateLimiter } from './rate-limit.mjs';
+import {
+  listTasks, getTask, getTaskEvents, getResume,
+  getActivity, listDecisions, listAgents,
+} from './queries.mjs';
 
 const json = (obj, status = 200, headers = {}) =>
   new Response(JSON.stringify(obj), {
@@ -98,16 +112,126 @@ export default {
         return json({ ok: true, token_id: issued.token_id, token: issued.token }, 201);
       }
 
-      // -- Everything else: command handlers land in task 009 ----------
+      // -- Command API (task 009) ------------------------------------
+      if (path === '/api/commands' && request.method === 'POST') {
+        return handleCommand(request, db);
+      }
+
+      // -- Query API (task 009) ----------------------------------------
+      if (path.startsWith('/api/') && request.method === 'GET') {
+        return handleQuery(request, db, url);
+      }
+
+      // -- Unknown ------------------------------------------------------
       return json(
-        { ok: false, code: 'NOT_IMPLEMENTED', message: 'command handlers land in task 009' },
-        501,
+        { ok: false, code: 'NOT_FOUND', message: `no route ${request.method} ${path}` },
+        404,
       );
     } catch (e) {
       return authError(e);
     }
   },
 };
+
+// Command HTTP status by error code.
+function commandHttpStatus(code) {
+  switch (code) {
+    case 'AUTH_REQUIRED': return 401;
+    case 'FORBIDDEN': return 403;
+    case 'NOT_FOUND': return 404;
+    case 'VALIDATION_FAILED': return 400;
+    case 'VERSION_CONFLICT':
+    case 'TASK_ALREADY_CLAIMED':
+    case 'INVALID_TRANSITION':
+    case 'PROJECTION_CONFLICT': return 409;
+    case 'RATE_LIMITED': return 429;
+    default: return 500;
+  }
+}
+
+const MAX_COMMAND_BYTES = 1024 * 1024; // 1 MiB
+const commandLimiter = createRateLimiter({ limit: 120, windowMs: 60_000 });
+
+async function handleCommand(request, db) {
+  const principal = await authenticate(db, request);
+  if (!principal) {
+    return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
+  }
+
+  const key = principal.kind === 'david' ? 'david' : `agent:${principal.agent_id}`;
+  const rl = commandLimiter.check(key);
+  if (!rl.ok) {
+    return json({
+      ok: false, code: 'RATE_LIMITED',
+      message: `command rate limit exceeded; retry in ${Math.ceil(rl.retryAfterMs / 1000)}s`,
+      retryable: true, retry_after_ms: rl.retryAfterMs,
+    }, 429, { 'retry-after': String(Math.ceil(rl.retryAfterMs / 1000)) });
+  }
+
+  const contentLength = Number(request.headers.get('content-length') || 0);
+  if (contentLength > MAX_COMMAND_BYTES) {
+    return json({ ok: false, code: 'VALIDATION_FAILED', message: 'command body exceeds 1 MiB' }, 400);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, code: 'VALIDATION_FAILED', message: 'JSON body required' }, 400);
+  }
+
+  const result = await executeCommand(db, principal, body);
+  if (result.ok) return json(result, 200);
+  return json(result, commandHttpStatus(result.code));
+}
+
+async function handleQuery(request, db, url) {
+  const principal = await authenticate(db, request);
+  if (!principal) {
+    return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
+  }
+
+  const segs = url.pathname.split('/').filter(Boolean); // ['api', ...]
+  const q = (name) => url.searchParams.get(name);
+
+  // GET /api/tasks
+  if (segs.length === 2 && segs[1] === 'tasks') {
+    return json({ ok: true, ...(await listTasks(db, { status: q('status'), assignee: q('assignee'), limit: q('limit') })) });
+  }
+  // GET /api/tasks/{id}[/events|/resume]
+  if (segs.length >= 3 && segs[1] === 'tasks') {
+    const task_id = decodeURIComponent(segs[2]);
+    if (segs.length === 3) {
+      const task = await getTask(db, task_id);
+      if (!task) return json({ ok: false, code: 'NOT_FOUND', message: `task ${task_id} not found` }, 404);
+      return json({ ok: true, task });
+    }
+    if (segs.length === 4 && segs[3] === 'events') {
+      const data = await getTaskEvents(db, task_id, { after_seq: q('after_seq'), limit: q('limit') });
+      if (!data) return json({ ok: false, code: 'NOT_FOUND', message: `task ${task_id} not found` }, 404);
+      return json({ ok: true, ...data });
+    }
+    if (segs.length === 4 && segs[3] === 'resume') {
+      const resume = await getResume(db, task_id);
+      if (!resume) return json({ ok: false, code: 'NOT_FOUND', message: `task ${task_id} not found` }, 404);
+      return json({ ok: true, resume });
+    }
+  }
+  // GET /api/activity
+  if (segs.length === 2 && segs[1] === 'activity') {
+    return json({ ok: true, ...(await getActivity(db, { limit: q('limit') })) });
+  }
+  // GET /api/decisions
+  if (segs.length === 2 && segs[1] === 'decisions') {
+    return json({ ok: true, ...(await listDecisions(db, { state: q('state') })) });
+  }
+  // GET /api/agents
+  if (segs.length === 2 && segs[1] === 'agents') {
+    return json({ ok: true, ...(await listAgents(db)) });
+  }
+
+  return json({ ok: false, code: 'NOT_FOUND', message: `no route GET ${url.pathname}` }, 404);
+}
 
 // Never leak internal principal fields to clients.
 function sanitizePrincipal(p) {

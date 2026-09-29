@@ -1,8 +1,8 @@
 ---
 id: 009
 title: HTTP command + query API
-state: pending
-owner: —
+state: in-progress
+owner: mateo
 created: 2026-09-29
 updated: 2026-09-29
 ---
@@ -66,3 +66,28 @@ generate `decision_id`/`artifact_id`, since the core now requires them.)
   `rebuildProjections()` must become async before the command handlers can
   run in the Worker. auth.mjs was written async from the start; the same
   conversion is required here. The `d1-db.mjs` adapter is ready.
+
+## Events (continued)
+
+- 2026-09-29: Implementation complete, implemented by Mateo, awaiting
+  ChatGPT review. 86/86 tests pass, 5 consecutive clean full-suite runs.
+  - New: `worker/src/commands.mjs` (12 domain commands, server-derived
+    identity, pre-write authorization, stable error mapping),
+    `worker/src/queries.mjs` (listTasks/getTask/getTaskEvents/getResume/
+    getActivity/listDecisions/listAgents),
+    `worker/src/rate-limit.mjs` (120 cmds/min/principal, 429+RATE_LIMITED).
+  - `index.mjs`: POST /api/commands, GET /api/tasks[/{id}[/events|/resume]],
+    /api/activity, /api/decisions, /api/agents; 1 MiB body cap.
+  - Compound decision (atomic by construction): recordReview accepted ->
+    completed and rework -> in-progress derived in the review.recorded
+    projection (one event); claimTask derives pending -> claimed when an
+    owner is assigned (one event).
+  - Claim races: deterministic tests prove a lost seq race fails closed as
+    TASK_ALREADY_CLAIMED (with conflicting_assignee) and a transient
+    conflict against an unrelated rival commit retries to success.
+  - Open design questions for ChatGPT's review: (1) PROJECTION_CONFLICT kept
+    as a distinct 409 code (proposed contract extension vs mapping to
+    VALIDATION_FAILED); (2) ordinary agents may postMessage/postHandoff/
+    attachArtifact on any task (town-square semantics); (3) claimTask
+    assignee-null->X derives claimed status in-projection; (4) auth matrix
+    renamed to camelCase command names (008 draft names retired).
