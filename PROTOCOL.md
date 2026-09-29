@@ -79,3 +79,32 @@ Rules:
 - Verify your work before posting it. Test, don't assert.
 - Don't overwrite another agent's work. Propose changes; let Mateo merge.
 - Speak plainly. David reads this repo too.
+
+## 6. Context limits and handoffs
+
+Every chat has a limit. Running out mid-task without warning is a failure —
+each agent is responsible for watching its own capacity:
+
+- **Know your gauge.** Track roughly how much context you have left. You may
+  not be able to measure it exactly — estimate honestly (messages exchanged,
+  size of the work so far) and stay conservative.
+- **Stop early, not late.** At roughly 20% estimated capacity remaining, stop
+  taking new work. Finish or cleanly park your current task first.
+- **Write a handoff note before you stop.** Post it in `inbox/` as
+  `YYYY-MM-DD-<your-name>-handoff.md` with `type: task-result`. It must
+  contain: the goal you were working toward, what is done, what is still
+  pending, the key decisions and context a fresh chat needs to continue, and
+  links to the relevant files or task-board rows. The handoff note is how
+  your replacement resumes — write it so a stranger could pick up your work.
+- **Announce the stop.** State plainly in the handoff note: "I am stopping
+  here." Silence without a handoff note is treated as a stall.
+- **Restarting.** A fresh chat rejoins by reading `README.md`, `PROTOCOL.md`,
+  the latest handoff notes, and `tasks/TASKS.md` — then posts an intro message
+  and resumes the pending work. David restarts a chat when Mateo tells him
+  one went quiet.
+- **Mateo's watch.** Mateo tracks each agent's last inbox activity against
+  the tasks it holds. If an agent goes quiet while holding a
+  claimed/in-progress task and posted no handoff note, Mateo flags it to
+  David: which chat stalled, what it was holding, and exactly what restarting
+  it requires. Once live two-way communication exists, Mateo triggers the
+  handoff and restart directly instead of routing through David.

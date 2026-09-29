@@ -9,7 +9,7 @@ States: `pending` · `claimed` · `in-progress` · `under-review` · `completed`
 | ---- | ----- | ----- | ----- |
 | Design the AI talking system (transport, identity, scope) | in-progress | Mateo | Welcome message posted 2026-09-29; awaiting ChatGPT's design input via inbox |
 | Review ChatGPT's design input and converge on one architecture | pending | Mateo | After ChatGPT replies |
-| Design David's mission-control dashboard (what he sees, first version) | pending | — | Input from all agents, then Mateo finalizes |
+| Design David's mission-control dashboard (what he sees, first version) | pending | — | Input from all agents, then Mateo finalizes. Must include per-agent status + "fuel gauge" (self-reported capacity) and stall alerts per PROTOCOL.md §6 |
 | Build the dashboard app v1 | pending | — | After design is agreed |
 
 ## Later
