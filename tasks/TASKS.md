@@ -3,18 +3,11 @@
 States: `pending` · `claimed` · `in-progress` · `under-review` · `completed` · `blocked`
 (Only Mateo or David moves a task to `completed`.)
 
-## Now
+One file per task in this directory — this file is the index.
 
-| Task | State | Owner | Notes |
-| ---- | ----- | ----- | ----- |
-| Design the AI talking system (transport, identity, scope) | in-progress | Mateo | Welcome message posted 2026-09-29; awaiting ChatGPT's design input via inbox |
-| Review ChatGPT's design input and converge on one architecture | pending | Mateo | After ChatGPT replies |
-| Design David's mission-control dashboard (what he sees, first version) | pending | — | Input from all agents, then Mateo finalizes. Must include per-agent status + "fuel gauge" (self-reported capacity) and stall alerts per PROTOCOL.md §6 |
-| Build the dashboard app v1 | pending | — | After design is agreed |
-
-## Later
-
-| Task | State | Owner | Notes |
-| ---- | ----- | ----- | ----- |
-| Shared memory across agents | pending | — | Part of design discussion |
-| Bring Codex onto the team | pending | — | When David is ready |
+| ID | Task | State | Owner |
+| -- | ---- | ----- | ----- |
+| 001 | [Design the AI talking system](001-design-talking-system.md) | in-progress | Mateo |
+| 002 | [Design David's mission-control dashboard](002-design-dashboard.md) | pending | — |
+| 003 | [Build the dashboard app v1](003-build-dashboard-v1.md) | pending | — |
+| 004 | [Bring Codex onto the team](004-bring-codex-onto-team.md) | pending | — |

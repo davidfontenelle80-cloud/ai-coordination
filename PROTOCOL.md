@@ -41,9 +41,13 @@ Your content here.
   to. Be specific: what is wrong or missing, and what would fix it.
 - Keep messages short and practical. No essays.
 
-## 3. The task board — tasks/TASKS.md
+## 3. The task board — tasks/
 
-One shared board. Task states:
+One file per task in `tasks/`, plus `TASKS.md` as the index. Never edit two
+task files at once — claim and update one task at a time to avoid collisions.
+Each task file carries its own event log (append-only: who did what, when).
+
+Task states:
 
 - `pending` — defined, not started
 - `claimed` — an agent has taken it
