@@ -12,12 +12,17 @@
 //                             constraint violation (single linearization point)
 //
 // Concurrency model (D1-compatible):
-//   * Read phase: idempotency check, current version read, seq computation.
+//   * Static validation, then the idempotency lookup — BEFORE any
+//     state-dependent validation, so retries of committed commands replay
+//     instead of failing against moved-on state.
+//   * Read phase: current version read, seq computation.
 //   * Write phase: ONE atomic batch [INSERT event, projection statements].
 //   * The UNIQUE(COALESCE(task_id,''), seq) constraint makes the batch fail
 //     atomically when a concurrent writer committed first. On failure we
-//     re-check idempotency (retry of the same command -> return existing)
-//     then re-read the version: stale expected_task_version -> VERSION_CONFLICT.
+//     re-check idempotency (retry of the same command -> return existing),
+//     then classify: sequence advanced -> genuine race, retry (bounded);
+//     sequence did not advance -> PROJECTION_CONFLICT, surfaced, not retried.
+//     Stale expected_task_version -> VERSION_CONFLICT.
 //   * Invariant: tasks.version == seq of the last task-scoped event.
 
 import { randomUUID } from 'node:crypto';
@@ -85,40 +90,82 @@ function validatePayload(eventType, p) {
       return null;
     case 'task.changed': {
       if (!TASK_CHANGED_FIELDS.includes(p.field)) return `task.changed field must be one of ${TASK_CHANGED_FIELDS.join(', ')}`;
+      if (p.to === undefined) return 'task.changed requires payload.to';
       if (p.field === 'status') {
         if (!TASK_STATUSES.includes(p.to)) return `unknown status ${p.to}`;
+      } else if (p.field === 'title' || p.field === 'priority') {
+        if (!nonEmptyString(p.to)) return `task.changed ${p.field} requires a non-empty string "to"`;
+      } else if (p.field === 'assignee') {
+        if (p.to !== null && typeof p.to !== 'string') return 'task.changed assignee "to" must be a string or null';
+      } else if (p.field === 'deadline') {
+        if (p.to !== null && !nonEmptyString(p.to)) return 'task.changed deadline "to" must be a non-empty string or null';
       }
-      if (p.to === undefined) return 'task.changed requires payload.to';
       return null;
     }
     case 'message.posted':
       if (!MESSAGE_KINDS.includes(p.kind)) return `message.posted kind must be one of ${MESSAGE_KINDS.join(', ')}`;
       if (!nonEmptyString(p.body)) return 'message.posted requires payload.body';
+      if (p.reply_to !== undefined && p.reply_to !== null && !nonEmptyString(p.reply_to)) {
+        return 'message.posted payload.reply_to must be a non-empty string';
+      }
       return null;
     case 'result.submitted':
       if (!nonEmptyString(p.summary)) return 'result.submitted requires payload.summary';
+      if (p.links !== undefined && !Array.isArray(p.links)) return 'result.submitted payload.links must be an array';
+      if (p.evidence !== undefined && p.evidence !== null &&
+          (typeof p.evidence !== 'object' || Array.isArray(p.evidence))) {
+        return 'result.submitted payload.evidence must be an object';
+      }
       return null;
     case 'review.recorded':
       if (!REVIEW_OUTCOMES.includes(p.outcome)) return `review.recorded outcome must be one of ${REVIEW_OUTCOMES.join(', ')}`;
+      if (p.notes !== undefined && p.notes !== null && typeof p.notes !== 'string') {
+        return 'review.recorded payload.notes must be a string';
+      }
       return null;
     case 'decision.changed':
+      // decision_id is required (not generated): projections must be pure
+      // functions of the event so rebuilds reproduce identical state.
+      if (!nonEmptyString(p.decision_id)) return 'decision.changed requires payload.decision_id';
       if (!DECISION_PHASES.includes(p.phase)) return `decision.changed phase must be one of ${DECISION_PHASES.join(', ')}`;
       if (p.phase === 'requested' && !nonEmptyString(p.question)) return 'decision.changed requested requires payload.question';
       if (p.phase === 'resolved' && !nonEmptyString(p.resolution)) return 'decision.changed resolved requires payload.resolution';
+      if (p.options !== undefined && !Array.isArray(p.options)) return 'decision.changed payload.options must be an array';
       return null;
     case 'handoff.posted':
       if (!nonEmptyString(p.goal)) return 'handoff.posted requires payload.goal';
-      for (const k of ['done', 'pending']) {
+      for (const k of ['done', 'pending', 'references']) {
         if (p[k] !== undefined && !Array.isArray(p[k])) return `handoff.posted payload.${k} must be an array`;
+      }
+      for (const k of ['key_context', 'agent_id', 'reason']) {
+        if (p[k] !== undefined && p[k] !== null && typeof p[k] !== 'string') {
+          return `handoff.posted payload.${k} must be a string`;
+        }
       }
       return null;
     case 'artifact.attached':
+      // artifact_id is required (not generated): see decision.changed note.
+      if (!nonEmptyString(p.artifact_id)) return 'artifact.attached requires payload.artifact_id';
       if (!nonEmptyString(p.name)) return 'artifact.attached requires payload.name';
       if (!nonEmptyString(p.uri)) return 'artifact.attached requires payload.uri';
+      for (const k of ['mime_type', 'sha256', 'supersedes']) {
+        if (p[k] !== undefined && p[k] !== null && !nonEmptyString(p[k])) {
+          return `artifact.attached payload.${k} must be a non-empty string`;
+        }
+      }
       return null;
     case 'agent.status_changed':
+      if (p.agent_id !== undefined && !nonEmptyString(p.agent_id)) {
+        return 'agent.status_changed payload.agent_id must be a non-empty string';
+      }
       if (!CONTEXT_HEALTHS.includes(p.context_health)) return `context_health must be one of ${CONTEXT_HEALTHS.join(', ')}`;
       if (!WORK_STATES.includes(p.work_state)) return `work_state must be one of ${WORK_STATES.join(', ')}`;
+      // Complete snapshot: callers state the task binding explicitly —
+      // null clears it — so replay assigns directly instead of COALESCE.
+      if (!('current_task_id' in p)) return 'agent.status_changed requires payload.current_task_id (string or null)';
+      if (p.current_task_id !== null && !nonEmptyString(p.current_task_id)) {
+        return 'agent.status_changed payload.current_task_id must be a string or null';
+      }
       return null;
     default:
       return `unknown event_type ${eventType}`;
@@ -140,6 +187,16 @@ export function validateEvent(input) {
   }
   const payloadErr = validatePayload(input.event_type, input.payload);
   if (payloadErr) return fail(payloadErr);
+  // Scope enforcement: each event type lives in exactly one scope.
+  // task.created generates its task_id when absent; decision.changed,
+  // handoff.posted and artifact.attached are dual-scope by design.
+  const TASK_SCOPED = ['task.changed', 'message.posted', 'result.submitted', 'review.recorded'];
+  if (TASK_SCOPED.includes(input.event_type) && !nonEmptyString(input.task_id)) {
+    return fail(`${input.event_type} is task-scoped and requires task_id`);
+  }
+  if (input.event_type === 'agent.status_changed' && input.task_id != null) {
+    return fail('agent.status_changed is workspace-scoped and requires task_id null');
+  }
   // Status-transition legality is checked against the live projection at
   // append time (needs current status); payload shape is checked here.
   return { ok: true };
@@ -251,7 +308,7 @@ function taskProjectionStmts(ev) {
       return [
         { sql: `INSERT INTO artifact_refs (artifact_id, event_id, task_id, name, mime_type, uri, sha256, supersedes, created_by, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          params: [p.artifact_id || genArtifactId(), ev.event_id, t, p.name,
+          params: [p.artifact_id, ev.event_id, t, p.name,
                    p.mime_type ?? null, p.uri, p.sha256 ?? null, p.supersedes ?? null,
                    ev.actor_id, ev.created_at] },
         { sql: `UPDATE tasks SET version = ?, updated_at = ? WHERE task_id = ?`,
@@ -298,7 +355,9 @@ function applyProjection(ev) {
     }
     case 'decision.changed': {
       const p = ev.payload;
-      const decisionId = p.decision_id || genDecisionId();
+      // p.decision_id is required by validation: projections are pure
+      // functions of the event, so rebuilds reproduce identical state.
+      const decisionId = p.decision_id;
       stmts.push({
         sql: `INSERT INTO decisions (decision_id, task_id, phase, question, options, resolution, version, updated_at)
               VALUES (?, ?, ?, ?, ?, ?, 1, ?)
@@ -330,7 +389,7 @@ function applyProjection(ev) {
               ON CONFLICT (agent_id) DO UPDATE SET
                 context_health = excluded.context_health,
                 work_state = excluded.work_state,
-                current_task_id = COALESCE(excluded.current_task_id, agents.current_task_id),
+                current_task_id = excluded.current_task_id,
                 version = agents.version + 1,
                 updated_at = excluded.updated_at`,
         params: [agentId, p.context_health, p.work_state, p.current_task_id ?? null, ev.created_at],
@@ -347,6 +406,76 @@ function applyProjection(ev) {
 // append
 // ---------------------------------------------------------------------------
 
+// Retry budget for lost races. Sized for the expected team: even if every
+// agent collides on the same scope at once, a bounded linear retry converges.
+const MAX_APPEND_ATTEMPTS = 8;
+
+// Current sequence position of a scope: tasks.version for a task scope,
+// MAX(seq) over task-less events for the workspace scope. Every committed
+// event in a scope advances exactly one of these, which is what lets the
+// write-phase failure handler distinguish a genuine race (retry) from a
+// projection conflict (surface the error).
+function readVersion(db, taskId) {
+  if (taskId) {
+    const t = db.queryOne('SELECT version FROM tasks WHERE task_id = ?', [taskId]);
+    return t ? t.version : 0;
+  }
+  const m = db.queryOne('SELECT MAX(seq) AS m FROM events WHERE task_id IS NULL', []);
+  return (m && m.m) || 0;
+}
+
+const TASK_FIELD_COLUMNS = { status: 'status', assignee: 'assignee', priority: 'priority',
+                             deadline: 'deadline', title: 'title' };
+
+// State-dependent validation: everything that needs the live projections.
+// Runs AFTER the idempotency lookup, so a retry of a committed command is
+// never re-validated against state that moved on.
+function validateAgainstState(db, input, taskId) {
+  const t = input.event_type;
+  const p = input.payload;
+
+  let taskRow = null;
+  if (taskId) {
+    taskRow = db.queryOne(
+      'SELECT status, version, title, assignee, priority, deadline FROM tasks WHERE task_id = ?',
+      [taskId]);
+    if (!taskRow && t !== 'task.created') return fail(`task ${taskId} does not exist`);
+  }
+
+  if (t === 'task.changed') {
+    if (p.field === 'status') {
+      // The log must not record a false prior value: a supplied `from`
+      // has to match the actual current status.
+      if (p.from !== undefined && p.from !== taskRow.status) {
+        return fail(`task.changed from mismatch: payload says ${JSON.stringify(p.from)}, actual status is ${taskRow.status}`);
+      }
+      const allowed = STATUS_TRANSITIONS[taskRow.status] || [];
+      if (!allowed.includes(p.to)) {
+        return { ok: false, code: 'VALIDATION_FAILED',
+                 message: `illegal status transition ${taskRow.status} -> ${p.to}` };
+      }
+    } else {
+      const col = TASK_FIELD_COLUMNS[p.field];
+      const actual = taskRow[col] ?? null;
+      const claimed = p.from ?? null;
+      if (p.from !== undefined && claimed !== actual) {
+        return fail(`task.changed from mismatch on ${p.field}: payload says ${JSON.stringify(claimed)}, actual is ${JSON.stringify(actual)}`);
+      }
+    }
+  }
+
+  // result.submitted drives the status machine directly (it is not a
+  // task.changed), so it must respect the machine itself: results come
+  // only from in-progress work, and completed stays terminal.
+  if (t === 'result.submitted' && taskRow.status !== 'in-progress') {
+    return fail(`result.submitted requires status in-progress, task is ${taskRow.status}`);
+  }
+  if (t === 'review.recorded' && taskRow.status !== 'under-review') {
+    return fail(`review.recorded requires status under-review, task is ${taskRow.status}`);
+  }
+  return null;
+}
+
 /**
  * Append one event atomically (event row + projection updates in a single
  * batch). Returns:
@@ -354,6 +483,15 @@ function applyProjection(ev) {
  *   { ok:true, event, replayed:true }         — idempotent retry, existing returned
  *   { ok:false, code:'VALIDATION_FAILED', message }
  *   { ok:false, code:'VERSION_CONFLICT', current_task_version }
+ *   { ok:false, code:'PROJECTION_CONFLICT', message } — a projection
+ *     constraint failed without any concurrent sequence advance (e.g.
+ *     duplicate artifact_id); not a race, not retried blindly.
+ *
+ * Ordering guarantee: the idempotency lookup runs before ANY
+ * state-dependent validation. A retry of an already-committed command
+ * returns the original event even when re-validating it against current
+ * state would fail (e.g. repeating a status change that already moved the
+ * task). Only static input validation runs before the lookup.
  */
 export function appendEvent(db, input, opts = {}) {
   const v = validateEvent(input);
@@ -363,39 +501,29 @@ export function appendEvent(db, input, opts = {}) {
   const taskId = input.task_id ?? (input.event_type === 'task.created' ? genTaskId() : null);
   const expected = input.expected_task_version ?? null;
 
-  // Status-transition legality needs the live projection.
-  if (input.event_type === 'task.changed' && input.payload.field === 'status' && taskId) {
-    const row = db.queryOne('SELECT status FROM tasks WHERE task_id = ?', [taskId]);
-    if (!row) return fail(`task ${taskId} does not exist`);
-    const allowed = STATUS_TRANSITIONS[row.status] || [];
-    if (!allowed.includes(input.payload.to)) {
-      return { ok: false, code: 'VALIDATION_FAILED',
-               message: `illegal status transition ${row.status} -> ${input.payload.to}` };
-    }
-  }
-  if (input.event_type !== 'task.created' && taskId) {
-    const row = db.queryOne('SELECT 1 AS x FROM tasks WHERE task_id = ?', [taskId]);
-    if (!row) return fail(`task ${taskId} does not exist`);
+  // Idempotency first: never re-validate a committed command against
+  // state that has moved on since it was accepted.
+  const preExisting = db.queryOne(
+    'SELECT * FROM events WHERE actor_id = ? AND idempotency_key = ?',
+    [input.actor_id, input.idempotency_key]);
+  if (preExisting) return { ok: true, event: rowToEvent(preExisting), replayed: true };
+
+  // Fast-path concurrency check: a stale expected version can never
+  // succeed, so report it before any other state-dependent validation.
+  // (This also keeps concurrent losers on VERSION_CONFLICT deterministically
+  // instead of sometimes tripping the from-match check after a commit.)
+  const preVersion = readVersion(db, taskId);
+  if (expected !== null && taskId && expected !== preVersion) {
+    return { ok: false, code: 'VERSION_CONFLICT', current_task_version: preVersion };
   }
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // State-dependent validation (needs the live projections).
+  const stateErr = validateAgainstState(db, input, taskId);
+  if (stateErr) return stateErr;
+
+  for (let attempt = 0; attempt < MAX_APPEND_ATTEMPTS; attempt++) {
     // ---- read phase (no locks held) ----
-    const existing = db.queryOne(
-      'SELECT * FROM events WHERE actor_id = ? AND idempotency_key = ?',
-      [input.actor_id, input.idempotency_key]);
-    if (existing) return { ok: true, event: rowToEvent(existing), replayed: true };
-
-    let currentVersion = 0;
-    if (taskId) {
-      const t = db.queryOne('SELECT version FROM tasks WHERE task_id = ?', [taskId]);
-      currentVersion = t ? t.version : 0;
-    } else {
-      // Workspace scope (task_id NULL): sequence from the max seq of
-      // task-less events. Without this every workspace event computed
-      // seq = 1 and the second one died on the UNIQUE(scope, seq) index.
-      const m = db.queryOne('SELECT MAX(seq) AS m FROM events WHERE task_id IS NULL', []);
-      currentVersion = (m && m.m) || 0;
-    }
+    const currentVersion = readVersion(db, taskId);
     if (expected !== null && taskId && expected !== currentVersion) {
       return { ok: false, code: 'VERSION_CONFLICT', current_task_version: currentVersion };
     }
@@ -432,23 +560,26 @@ export function appendEvent(db, input, opts = {}) {
       return { ok: true, event };
     } catch (err) {
       if (!isConstraintViolation(err)) throw err;
-      // Lost a race. Re-check idempotency first: a concurrent identical
-      // retry means we return the existing event, not an error.
+      // Lost a race (or hit a projection conflict). Re-check idempotency
+      // first: a concurrent identical retry means we return the existing
+      // event, not an error.
       const dup = db.queryOne(
         'SELECT * FROM events WHERE actor_id = ? AND idempotency_key = ?',
         [input.actor_id, input.idempotency_key]);
       if (dup) return { ok: true, event: rowToEvent(dup), replayed: true };
-      if (taskId) {
-        const t = db.queryOne('SELECT version FROM tasks WHERE task_id = ?', [taskId]);
-        const cur = t ? t.version : 0;
-        if (expected !== null && expected !== cur) {
-          return { ok: false, code: 'VERSION_CONFLICT', current_task_version: cur };
-        }
-        // No expected version: recompute seq and retry once.
-        continue;
+      // Classify: did the relevant sequence advance since our read? Every
+      // task-scoped event bumps tasks.version and every workspace event
+      // bumps MAX(seq) over task-less events, so an advance means a genuine
+      // concurrent commit (worth one retry); no advance means the batch
+      // failed on a projection constraint, not a race.
+      const cur = readVersion(db, taskId);
+      if (taskId && expected !== null && expected !== cur) {
+        return { ok: false, code: 'VERSION_CONFLICT', current_task_version: cur };
       }
-      // Workspace scope: expected_task_version is ignored by design, so a
-      // lost race just recomputes seq and retries once.
+      if (cur === currentVersion) {
+        return { ok: false, code: 'PROJECTION_CONFLICT',
+                 message: String((err && err.message) || err) };
+      }
       continue;
     }
   }
@@ -458,6 +589,12 @@ export function appendEvent(db, input, opts = {}) {
 /**
  * Rebuild all projections from the event stream. Events are untouched.
  * After: projections must equal the state produced by live appends.
+ *
+ * Limitation (documented, not a v1 blocker): the rebuild is destructive
+ * and only chunk-atomic — projections are wiped first, then rebuilt in
+ * chunks. If a chunk fails midway, projections are left partially rebuilt
+ * and the operator must re-run. Do not expose this as a routine production
+ * operation without shadow projections or another recovery strategy.
  */
 export function rebuildProjections(db, opts = {}) {
   const chunk = opts.chunkSize ?? 100;

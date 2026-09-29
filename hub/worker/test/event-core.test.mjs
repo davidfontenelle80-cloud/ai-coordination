@@ -311,7 +311,7 @@ describe('lifecycle + rebuild', () => {
     appendEvent(db, {
       event_type: 'agent.status_changed', actor_id: 'chatgpt', submitted_by: 'chatgpt',
       idempotency_key: 'sc-status',
-      payload: { agent_id: 'chatgpt', context_health: 'watch', work_state: 'idle' },
+      payload: { agent_id: 'chatgpt', context_health: 'watch', work_state: 'idle', current_task_id: null },
     }, { now: now() });
     const b = createTask({ key: 'sc-create-b', task_id: 'task_beta', title: 'Second task' }).event;
     appendEvent(db, {
@@ -388,10 +388,10 @@ describe('lifecycle + rebuild', () => {
 // ---------------------------------------------------------------------------
 
 describe('workspace-level events', () => {
-  const status = (key, health) => appendEvent(db, {
+  const status = (key, health, currentTaskId = null) => appendEvent(db, {
     event_type: 'agent.status_changed', actor_id: 'chatgpt', submitted_by: 'chatgpt',
     idempotency_key: key,
-    payload: { agent_id: 'chatgpt', context_health: health, work_state: 'idle' },
+    payload: { agent_id: 'chatgpt', context_health: health, work_state: 'idle', current_task_id: currentTaskId },
   }, { now: now() });
 
   it('sequences multiple task-less events contiguously without throwing', () => {
@@ -412,5 +412,354 @@ describe('workspace-level events', () => {
     assert.deepEqual(rebuilt, live);
     assert.equal(rebuilt.context_health, 'handoff-due');
     assert.equal(db.queryOne('SELECT COUNT(*) c FROM events').c, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ChatGPT review hardening (task 014)
+// ---------------------------------------------------------------------------
+
+describe('idempotency vs state validation', () => {
+  it('repeating a committed status change replays instead of failing the transition', () => {
+    const c = createTask({ key: 'idem-st-create', task_id: 'task_idem_st' });
+    const t = c.event.task_id;
+    const first = appendEvent(db, {
+      event_type: 'task.changed', actor_id: 'mateo', submitted_by: 'mateo',
+      idempotency_key: 'idem-st-1', task_id: t, expected_task_version: 1,
+      payload: { field: 'status', from: 'pending', to: 'claimed', reason: 'claim' },
+    }, { now: now() });
+    assert.equal(first.ok, true);
+    assert.equal(first.replayed, undefined);
+
+    // Identical retry: status is already claimed, so re-validating the
+    // transition would reject claimed -> claimed. Must replay instead.
+    const retry = appendEvent(db, {
+      event_type: 'task.changed', actor_id: 'mateo', submitted_by: 'mateo',
+      idempotency_key: 'idem-st-1', task_id: t, expected_task_version: 1,
+      payload: { field: 'status', from: 'pending', to: 'claimed', reason: 'claim' },
+    }, { now: now() });
+    assert.equal(retry.ok, true);
+    assert.equal(retry.replayed, true);
+    assert.equal(retry.event.event_id, first.event.event_id);
+    assert.equal(
+      db.queryOne("SELECT COUNT(*) c FROM events WHERE event_type = 'task.changed'").c, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('scope enforcement', () => {
+  it('rejects task-scoped events without task_id and workspace events with task_id', () => {
+    const c = createTask({ key: 'scope-create' });
+    const t = c.event.task_id;
+    const cases = [
+      ['task.changed', { field: 'assignee', to: 'x' }, null],
+      ['message.posted', { kind: 'message', body: 'hi' }, null],
+      ['result.submitted', { summary: 's' }, null],
+      ['review.recorded', { outcome: 'accepted' }, null],
+      ['agent.status_changed',
+        { agent_id: 'x', context_health: 'normal', work_state: 'idle', current_task_id: null }, t],
+    ];
+    for (const [event_type, payload, task_id] of cases) {
+      const r = appendEvent(db, {
+        event_type, actor_id: 'x', submitted_by: 'x',
+        idempotency_key: `scope-${event_type}`, task_id, payload,
+      }, { now: now() });
+      assert.equal(r.ok, false, `${event_type} should be scope-rejected`);
+      assert.equal(r.code, 'VALIDATION_FAILED');
+    }
+    // Dual-scope types still work without task_id.
+    const d = appendEvent(db, {
+      event_type: 'decision.changed', actor_id: 'mateo', submitted_by: 'mateo',
+      idempotency_key: 'scope-dec',
+      payload: { decision_id: 'dec_scope', phase: 'requested', question: 'Q?' },
+    }, { now: now() });
+    assert.equal(d.ok, true);
+    const h = appendEvent(db, {
+      event_type: 'handoff.posted', actor_id: 'mateo', submitted_by: 'mateo',
+      idempotency_key: 'scope-ho', payload: { goal: 'g', agent_id: 'mateo' },
+    }, { now: now() });
+    assert.equal(h.ok, true);
+  });
+
+  it('keeps the invariant tasks.version == seq of last task-scoped event', () => {
+    const c = createTask({ key: 'inv-create', task_id: 'task_inv' });
+    const t = c.event.task_id;
+    appendEvent(db, {
+      event_type: 'message.posted', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'inv-msg', task_id: t, expected_task_version: 1,
+      payload: { kind: 'message', body: 'hello' },
+    }, { now: now() });
+    // A workspace event must not disturb the task scope numbering.
+    appendEvent(db, {
+      event_type: 'agent.status_changed', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'inv-ws',
+      payload: { agent_id: 'a', context_health: 'normal', work_state: 'idle', current_task_id: null },
+    }, { now: now() });
+    appendEvent(db, {
+      event_type: 'decision.changed', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'inv-dec', task_id: t, expected_task_version: 2,
+      payload: { decision_id: 'dec_inv', phase: 'requested', question: 'Q?' },
+    }, { now: now() });
+    const row = db.queryOne('SELECT version FROM tasks WHERE task_id = ?', [t]);
+    const lastSeq = db.queryOne('SELECT MAX(seq) m FROM events WHERE task_id = ?', [t]).m;
+    assert.equal(row.version, 3);
+    assert.equal(row.version, lastSeq);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('deterministic projection ids', () => {
+  it('requires decision_id and artifact_id in payloads', () => {
+    const c = createTask({ key: 'det-create' });
+    const t = c.event.task_id;
+    const d = appendEvent(db, {
+      event_type: 'decision.changed', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'det-dec', task_id: t, expected_task_version: 1,
+      payload: { phase: 'requested', question: 'Q?' },
+    }, { now: now() });
+    assert.equal(d.ok, false);
+    assert.equal(d.code, 'VALIDATION_FAILED');
+    const a = appendEvent(db, {
+      event_type: 'artifact.attached', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'det-art', task_id: t, expected_task_version: 1,
+      payload: { name: 'n', uri: 'https://x/y' },
+    }, { now: now() });
+    assert.equal(a.ok, false);
+    assert.equal(a.code, 'VALIDATION_FAILED');
+  });
+
+  it('rebuild reproduces the exact same decision and artifact ids', () => {
+    const c = createTask({ key: 'det2-create' });
+    const t = c.event.task_id;
+    appendEvent(db, {
+      event_type: 'decision.changed', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'det2-dec', task_id: t, expected_task_version: 1,
+      payload: { decision_id: 'dec_det', phase: 'requested', question: 'Q?' },
+    }, { now: now() });
+    appendEvent(db, {
+      event_type: 'artifact.attached', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'det2-art', task_id: t, expected_task_version: 2,
+      payload: { artifact_id: 'art_det', name: 'n', uri: 'https://x/y' },
+    }, { now: now() });
+    const before = {
+      dec: db.queryOne('SELECT decision_id, phase FROM decisions', []),
+      art: db.queryOne('SELECT artifact_id, name FROM artifact_refs', []),
+    };
+    rebuildProjections(db);
+    const after = {
+      dec: db.queryOne('SELECT decision_id, phase FROM decisions', []),
+      art: db.queryOne('SELECT artifact_id, name FROM artifact_refs', []),
+    };
+    assert.deepEqual(after, before);
+    assert.equal(after.dec.decision_id, 'dec_det');
+    assert.equal(after.art.artifact_id, 'art_det');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('result and review state gates', () => {
+  function toInProgress(t, tag) {
+    appendEvent(db, {
+      event_type: 'task.changed', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: `g-claim-${tag}`, task_id: t, expected_task_version: 1,
+      payload: { field: 'status', from: 'pending', to: 'claimed', reason: 'c' },
+    }, { now: now() });
+    appendEvent(db, {
+      event_type: 'task.changed', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: `g-start-${tag}`, task_id: t, expected_task_version: 2,
+      payload: { field: 'status', from: 'claimed', to: 'in-progress', reason: 's' },
+    }, { now: now() });
+  }
+
+  it('rejects result.submitted unless in-progress; completed stays terminal', () => {
+    const c = createTask({ key: 'g-create', task_id: 'task_gate' });
+    const t = c.event.task_id;
+    const early = appendEvent(db, {
+      event_type: 'result.submitted', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'g-early', task_id: t, expected_task_version: 1,
+      payload: { summary: 'too soon' },
+    }, { now: now() });
+    assert.equal(early.ok, false);
+    assert.match(early.message, /in-progress/);
+
+    toInProgress(t, 't1');
+    const good = appendEvent(db, {
+      event_type: 'result.submitted', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'g-good', task_id: t, expected_task_version: 3,
+      payload: { summary: 'done' },
+    }, { now: now() });
+    assert.equal(good.ok, true);
+    assert.equal(db.queryOne('SELECT status FROM tasks WHERE task_id = ?', [t]).status, 'under-review');
+
+    // review requires under-review: a task only at in-progress must fail.
+    const c2 = createTask({ key: 'g-create2', task_id: 'task_gate2' });
+    const t2 = c2.event.task_id;
+    toInProgress(t2, 't2');
+    const badReview = appendEvent(db, {
+      event_type: 'review.recorded', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'g-badrev', task_id: t2, expected_task_version: 3,
+      payload: { outcome: 'accepted' },
+    }, { now: now() });
+    assert.equal(badReview.ok, false);
+    assert.match(badReview.message, /under-review/);
+
+    // Finish task 1 through review -> completed, then prove terminal.
+    appendEvent(db, {
+      event_type: 'review.recorded', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'g-rev', task_id: t, expected_task_version: 4,
+      payload: { outcome: 'accepted' },
+    }, { now: now() });
+    appendEvent(db, {
+      event_type: 'task.changed', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'g-done', task_id: t, expected_task_version: 5,
+      payload: { field: 'status', from: 'under-review', to: 'completed', reason: 'ship' },
+    }, { now: now() });
+    const late = appendEvent(db, {
+      event_type: 'result.submitted', actor_id: 'a', submitted_by: 'a',
+      idempotency_key: 'g-late', task_id: t, expected_task_version: 6,
+      payload: { summary: 'after the end' },
+    }, { now: now() });
+    assert.equal(late.ok, false);
+    assert.equal(db.queryOne('SELECT status FROM tasks WHERE task_id = ?', [t]).status, 'completed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('agent snapshot', () => {
+  it('current_task_id null clears the binding instead of preserving it', () => {
+    const r1 = appendEvent(db, {
+      event_type: 'agent.status_changed', actor_id: 'chatgpt', submitted_by: 'chatgpt',
+      idempotency_key: 'snap-1',
+      payload: { agent_id: 'chatgpt', context_health: 'normal', work_state: 'working', current_task_id: 'task_007' },
+    }, { now: now() });
+    assert.equal(r1.ok, true);
+    assert.equal(
+      db.queryOne('SELECT current_task_id FROM agents WHERE agent_id = ?', ['chatgpt']).current_task_id,
+      'task_007');
+    const r2 = appendEvent(db, {
+      event_type: 'agent.status_changed', actor_id: 'chatgpt', submitted_by: 'chatgpt',
+      idempotency_key: 'snap-2',
+      payload: { agent_id: 'chatgpt', context_health: 'normal', work_state: 'idle', current_task_id: null },
+    }, { now: now() });
+    assert.equal(r2.ok, true);
+    assert.equal(
+      db.queryOne('SELECT current_task_id FROM agents WHERE agent_id = ?', ['chatgpt']).current_task_id,
+      null);
+  });
+
+  it('rejects a status snapshot missing current_task_id', () => {
+    const r = appendEvent(db, {
+      event_type: 'agent.status_changed', actor_id: 'x', submitted_by: 'x',
+      idempotency_key: 'snap-3',
+      payload: { agent_id: 'x', context_health: 'normal', work_state: 'idle' },
+    }, { now: now() });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'VALIDATION_FAILED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('workspace contention', () => {
+  it('six simultaneous status writers all succeed with seqs 1..6', async () => {
+    const dbPath = join(tmpdir(), `hub-race-ws-${process.pid}-${Date.now()}.db`);
+    const setup = openDb(dbPath);
+    applySchema(setup, SCHEMA);
+    setup.close();
+
+    const N = 6;
+    const run = (i) => new Promise((resolve, reject) => {
+      const w = new Worker(new URL('./claim-racer.mjs', import.meta.url), {
+        workerData: {
+          dbPath,
+          input: {
+            event_type: 'agent.status_changed', actor_id: `agent-${i}`, submitted_by: `agent-${i}`,
+            idempotency_key: `ws-race-${i}`,
+            payload: { agent_id: `agent-${i}`, context_health: 'normal', work_state: 'working', current_task_id: null },
+          },
+        },
+      });
+      w.once('message', resolve);
+      w.once('error', reject);
+    });
+    const results = await Promise.all(Array.from({ length: N }, (_, i) => run(i)));
+    assert.ok(results.every((r) => r.ok), `all writers must succeed, got ${JSON.stringify(results)}`);
+
+    const check = openDb(dbPath);
+    try {
+      assert.equal(check.queryOne('SELECT COUNT(*) c FROM events').c, N);
+      const seqs = check.queryAll('SELECT seq FROM events ORDER BY seq', []).map((r) => r.seq);
+      assert.deepEqual(seqs, [1, 2, 3, 4, 5, 6]);
+    } finally {
+      check.close();
+      rmSync(dbPath, { force: true });
+    }
+  }, { timeout: 60000 });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('from honesty', () => {
+  it('rejects task.changed when payload.from disagrees with actual state', () => {
+    const c = createTask({ key: 'from-create', task_id: 'task_from' });
+    const t = c.event.task_id;
+    const lieStatus = appendEvent(db, {
+      event_type: 'task.changed', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'from-lie1', task_id: t, expected_task_version: 1,
+      payload: { field: 'status', from: 'blocked', to: 'claimed', reason: 'lie' },
+    }, { now: now() });
+    assert.equal(lieStatus.ok, false);
+    assert.match(lieStatus.message, /from mismatch/);
+
+    const lieField = appendEvent(db, {
+      event_type: 'task.changed', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'from-lie2', task_id: t, expected_task_version: 1,
+      payload: { field: 'assignee', from: 'nobody', to: 'chatgpt', reason: 'lie' },
+    }, { now: now() });
+    assert.equal(lieField.ok, false);
+    assert.match(lieField.message, /from mismatch/);
+
+    // Honest from (or omitted from) still works.
+    const honest = appendEvent(db, {
+      event_type: 'task.changed', actor_id: 'm', submitted_by: 'm',
+      idempotency_key: 'from-ok', task_id: t, expected_task_version: 1,
+      payload: { field: 'assignee', to: 'chatgpt', reason: 'assign' },
+    }, { now: now() });
+    assert.equal(honest.ok, true);
+    assert.equal(db.queryOne('SELECT COUNT(*) c FROM events').c, 2); // create + honest change
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('value validation', () => {
+  it('returns validation errors, not SQL exceptions, for malformed values', () => {
+    const c = createTask({ key: 'val-create', task_id: 'task_val' });
+    const t = c.event.task_id;
+    const bad = [
+      ['task.changed', { field: 'title', to: null }, t],
+      ['task.changed', { field: 'title', to: '' }, t],
+      ['task.changed', { field: 'priority', to: {} }, t],
+      ['task.changed', { field: 'assignee', to: [] }, t],
+      ['task.changed', { field: 'deadline', to: {} }, t],
+      ['decision.changed', { decision_id: 'x', phase: 'requested', question: 'q', options: 'nope' }, t],
+      ['result.submitted', { summary: 's', links: 'https://x' }, t],
+      ['handoff.posted', { goal: 'g', agent_id: 'm', references: {} }, null],
+      ['task.created', { title: '', goal: 'g' }, null],
+    ];
+    bad.forEach(([event_type, payload, task_id], i) => {
+      const r = appendEvent(db, {
+        event_type, actor_id: 'x', submitted_by: 'x',
+        idempotency_key: `val-${i}`, task_id, payload,
+      }, { now: now() });
+      assert.equal(r.ok, false, `${event_type} ${JSON.stringify(payload)} should fail validation`);
+      assert.equal(r.code, 'VALIDATION_FAILED');
+    });
+    // Only the one task.created exists; nothing else was written.
+    assert.equal(db.queryOne('SELECT COUNT(*) c FROM events').c, 1);
   });
 });

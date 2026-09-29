@@ -38,6 +38,17 @@ error_code, message, current_task_version, retryable where applicable.
 
 Blocked on: 007, 008.
 
+**Prerequisite (from ChatGPT's event-core review, 2026-09-29):** decide the
+compound-command design BEFORE building this API. Commands like claimTask
+(assignee + status change) or recordReview-accepted (review.recorded +
+status → completed) are logically one domain action but currently two
+`appendEvent()` calls — a crash or conflict between them leaves half a
+command committed. Either (a) one domain command may append multiple
+events atomically, or (b) these transitions are represented by single
+events/projection changes. The choice must be made here, not discovered
+mid-implementation. (The 014 hardening also requires command handlers to
+generate `decision_id`/`artifact_id`, since the core now requires them.)
+
 ## Phase tests (must pass before 010 starts)
 
 - Deterministic 409 VERSION_CONFLICT on stale writes.

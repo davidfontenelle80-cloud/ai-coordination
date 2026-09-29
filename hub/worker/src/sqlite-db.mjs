@@ -15,13 +15,16 @@ import { DatabaseSync } from 'node:sqlite';
 
 export function openDb(path = ':memory:') {
   const db = new DatabaseSync(path);
+  // Set busy_timeout FIRST: concurrent worker threads opening the same file
+  // can hit a transient lock during open/recovery, and the journal_mode
+  // probe below needs the retry handler already in place.
+  db.exec('PRAGMA busy_timeout = 10000');
   // journal_mode is a persistent DB setting: set it once, skip when already WAL
   // so concurrently-opening connections never fight over the mode change.
   const mode = db.prepare('PRAGMA journal_mode').get();
   if (mode && mode.journal_mode !== 'wal') {
     db.exec('PRAGMA journal_mode = WAL');
   }
-  db.exec('PRAGMA busy_timeout = 10000');
   db.exec('PRAGMA foreign_keys = OFF');
 
   return {
