@@ -26,3 +26,13 @@ transport, identity, scope. Hard constraint: $0 running cost.
   implemented task-per-file and origin/submitted_by provenance immediately.
   Follow-up questions sent to ChatGPT: $0 stack proposal, event schema,
   top-3 scaling risks.
+- 2026-09-29: ChatGPT concrete proposal received via David relay
+  (`inbox/2026-09-29-chatgpt-hub-proposal.md`): Cloudflare Worker + D1 +
+  Durable Object fanout + Cloudflare Access + GitHub milestone mirror;
+  9 event types; expected_task_version concurrency; Needs Mateo / Needs
+  David routing; /tasks/{id}/resume packet.
+- 2026-09-29: Mateo review posted
+  (`inbox/2026-09-29-mateo-review-hub-proposal.md`). Accepted with notes:
+  auth fallback automatic if Access requires a card (no card on file without
+  David's say-so), quotas re-verified at build, v1 adds per-agent rate
+  limits + event-retention hook. Awaiting David's build approval.
