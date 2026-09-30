@@ -34,6 +34,134 @@ export const COMMANDS = [
   'setPriority', // task 010: David's dashboard needs to change priority.
 ];
 
+// Task 019: advertised input schema per command, kept beside the builders
+// that enforce it. The MCP tool catalog is generated from this table; the
+// builders below remain the single source of validation (a schema is only
+// a hint to the client — the hub still rejects bad input with
+// VALIDATION_FAILED exactly as over REST). Every command also takes the
+// common idempotency_key (required) and expected_task_version (optional).
+const S = { type: 'string', minLength: 1 };
+const HTTPS_URL = { type: 'string', format: 'uri', pattern: '^https:' };
+const NULLABLE_TASK_ID = {
+  type: ['string', 'null'], minLength: 1,
+  description: 'Task scope; omit or null for workspace scope. Ordinary agents: must be a task assigned to them.',
+};
+
+export const COMMAND_SCHEMAS = {
+  createTask: {
+    description: 'Create a task (Mateo/David only).',
+    properties: {
+      title: S, goal: S,
+      task_id: { ...S, description: 'Optional caller-chosen id; server generates one if omitted.' },
+      priority: { ...S, description: 'Optional priority label (default "normal").' },
+    },
+    required: ['title', 'goal'],
+  },
+  claimTask: {
+    description: 'Claim an unassigned task. Ordinary agents may only self-claim pending tasks; '
+      + 'Mateo/David may claim on behalf of another agent via assignee.',
+    properties: {
+      task_id: S,
+      assignee: { ...S, description: 'agent_id to assign (Mateo/David only; agents may only name themselves).' },
+      reason: { type: 'string' },
+    },
+    required: ['task_id'],
+  },
+  startTask: {
+    description: 'Move a task to in-progress (ordinary agents: own assigned tasks only).',
+    properties: { task_id: S, reason: { type: 'string' } },
+    required: ['task_id'],
+  },
+  blockTask: {
+    description: 'Mark a task blocked; give the blocker as reason (ordinary agents: own assigned tasks only).',
+    properties: { task_id: S, reason: { type: 'string' } },
+    required: ['task_id'],
+  },
+  postMessage: {
+    description: 'Post a message to a task\'s Team chat thread, attributed to the calling agent.',
+    properties: {
+      task_id: S,
+      body: S,
+      kind: { type: 'string', enum: MESSAGE_KINDS, description: 'Default "message".' },
+      reply_to: { ...S, description: 'Optional event_id being replied to.' },
+    },
+    required: ['task_id', 'body'],
+  },
+  submitResult: {
+    description: 'Submit a result for review; moves the task to under-review (ordinary agents: own assigned tasks only).',
+    properties: {
+      task_id: S,
+      summary: S,
+      evidence: { type: ['object', 'null'], description: 'Optional structured evidence object.' },
+      links: { type: 'array', items: HTTPS_URL, description: 'Optional https: URLs.' },
+    },
+    required: ['task_id', 'summary'],
+  },
+  recordReview: {
+    description: 'Record a review of the task\'s latest result (Mateo/David only). accepted completes the task.',
+    properties: {
+      task_id: S,
+      outcome: { type: 'string', enum: ['accepted', 'rework'] },
+      notes: { type: ['string', 'null'] },
+    },
+    required: ['task_id', 'outcome'],
+  },
+  requestDecision: {
+    description: 'Ask David for a decision, optionally scoped to a task.',
+    properties: {
+      task_id: NULLABLE_TASK_ID,
+      question: S,
+      options: { type: 'array', description: 'Optional list of options.' },
+    },
+    required: ['question'],
+  },
+  resolveDecision: {
+    description: 'Resolve a requested decision (David only — agent tokens are always refused).',
+    properties: { decision_id: S, resolution: S },
+    required: ['decision_id', 'resolution'],
+  },
+  postHandoff: {
+    description: 'Post a handoff packet describing your state so another agent (or you, after a context reset) can resume.',
+    properties: {
+      task_id: NULLABLE_TASK_ID,
+      goal: S,
+      done: { type: 'array' },
+      pending: { type: 'array' },
+      key_context: { type: ['string', 'null'] },
+      references: { type: 'array' },
+      reason: { type: ['string', 'null'] },
+      agent_id: { ...S, description: 'Mateo/David only; ordinary agents always post as themselves.' },
+    },
+    required: ['goal'],
+  },
+  attachArtifact: {
+    description: 'Attach an https: artifact reference, optionally to a task.',
+    properties: {
+      task_id: NULLABLE_TASK_ID,
+      name: S,
+      uri: HTTPS_URL,
+      mime_type: { ...S, type: ['string', 'null'] },
+      sha256: { ...S, type: ['string', 'null'] },
+    },
+    required: ['name', 'uri'],
+  },
+  setAgentStatus: {
+    description: 'Report agent status (ordinary agents: own status only).',
+    properties: {
+      context_health: { type: 'string', enum: CONTEXT_HEALTHS },
+      work_state: { type: 'string', enum: WORK_STATES },
+      current_task_id: { type: ['string', 'null'], minLength: 1 },
+      agent_id: { ...S, description: 'Mateo/David only; ordinary agents always report as themselves.' },
+    },
+    required: ['context_health', 'work_state', 'current_task_id'],
+  },
+  setPriority: {
+    description: 'Change a task\'s priority (Mateo/David only).',
+    properties: { task_id: S, priority: S },
+    required: ['task_id', 'priority'],
+  },
+};
+
 function cmdErr(code, message, extra) {
   const e = new Error(message);
   e.code = code;

@@ -101,3 +101,88 @@ edge posture to fix it.
   verification; merging to main.
 - Mateo retains review, deployment, and live verification after the branch
   is ready.
+
+---
+
+# Build record (builder: Claude, branch `codex/task-019-mcp-server`)
+
+## Decisions and changes
+- `POST /mcp` in `hub/worker/src/index.mjs`; JSON-RPC in new `hub/worker/src/mcp.mjs`.
+  Methods: `initialize`, `notifications/initialized` (and any notification →
+  202, no body), `ping`, `tools/list`, `tools/call`. No `Mcp-Session-Id`, no
+  server state. `GET /mcp` (or any non-POST) → 405 `allow: POST`, since no SSE
+  stream is offered. JSON-RPC batches are rejected (-32600).
+- Protocol versions: `2025-06-18` (preferred) and `2025-03-26`. `initialize`
+  echoes a supported client version, otherwise offers `2025-06-18`. An
+  unsupported `MCP-Protocol-Version` header on later requests → 400.
+- Server identity `{ name: "ai-hub", version: "0.1.0" }`; a test pins it to
+  `hub/package.json` so a version bump cannot drift silently.
+- Auth: `/mcp` requires `Authorization: Bearer …` and then calls the same
+  `authenticate()` as REST. No bearer header → `AUTH_REQUIRED` 401 before
+  `authenticate()` runs, so David's session cookie is never consulted on
+  `/mcp`. Bad/revoked/disabled tokens throw into the existing fetch catch:
+  same 401 bodies (`AUTH_BAD_TOKEN`, `AUTH_TOKEN_REVOKED`, …) and the same
+  bearer brute-force limiter. No `WWW-Authenticate` header (REST sends none).
+- Single source of truth: `queries.mjs` now exports `QUERIES` (8 entries:
+  schema, description, `run()` returning the hub envelope). REST
+  `GET /api/*` dispatches through it (behavior unchanged; the 151 baseline
+  tests pass). `commands.mjs` exports `COMMAND_SCHEMAS` beside the builders.
+  `tools/list` is generated from those tables; a test asserts they cover
+  `COMMANDS` and the 8 queries exactly.
+- Command tools call `executeCommand(db, principal, { ...args, command })`.
+  `command` is fixed by the tool, caller `actor_id`/`submitted_by` are
+  discarded as over REST, and `authorize()` plus the builder rules apply
+  unchanged. `idempotency_key` is required (REST parity: the server never
+  generates one).
+- Query tools type-check arguments against their schema (strings/integers,
+  required `task_id`) → `VALIDATION_FAILED`. REST query params are always
+  strings, so this adds no REST behavior; it only stops non-string JSON
+  values reaching SQL binds.
+- Errors: hub failures → `CallToolResult` `isError: true`, with the hub body
+  as text content and `structuredContent`. Unknown tool / non-object
+  arguments → -32602; unknown method → -32601; bad JSON → -32700 (400);
+  bad envelope → -32600 (400); unexpected exceptions → -32603 "internal
+  error" (logged, never echoed).
+- Rate limiting "exactly as `/api/*`": command tools draw from the same
+  per-principal 120/min bucket as `POST /api/commands` (shared across both
+  surfaces); read tools are unlimited, like `GET /api/*`. A limited command
+  returns `isError` with the hub `RATE_LIMITED` body (`retry_after_ms`).
+  Same 1 MiB body cap (the reader was extracted and shared).
+- Not tools: token issuance, revocation, inventory. Calling such a name →
+  -32602 unknown tool (tested).
+
+## Validation
+- Baseline 151/151 → 179/179 passing (`npm test` in hub). 28 new
+  dependency-free tests in `hub/worker/test/mcp.test.mjs`: initialize
+  (server info, version pin, no session id, version negotiation),
+  notifications → 202, ping, protocol-version header, GET 405; tools/list =
+  exactly 21 with schemas, catalog = REST tables, no token tools;
+  missing token → `AUTH_REQUIRED` (same body as REST), unauthenticated
+  initialize rejected, bad/unknown token, revoked → `AUTH_TOKEN_REVOKED`,
+  David cookie refused on `/mcp` (while accepted on REST), brute-force 429;
+  `get_activity` happy path; `post_message` attributed to the caller and
+  visible in `get_activity` (spoofed `actor_id`/`command` ignored); ordinary
+  agent `create_task` → the same FORBIDDEN body as REST; Mateo
+  `resolve_decision` refused; assignee rule on `start_task`; bad params →
+  the same `VALIDATION_FAILED` body as REST; query tools deep-equal their REST
+  responses (including not-found); shared command rate bucket; malformed
+  JSON-RPC → -32700/-32600/-32601/-32602, no leak; oversized body; internal
+  error → -32603 with no detail.
+- `node --check` passes on every source and test file (the repo has no linter
+  configured).
+- No new dependency, migration, table, paid resource, billing profile, or
+  payment method. REST/auth semantics unchanged.
+
+## Open items for Mateo's review
+- **Live UA check: NOT DONE** (no deploy in this task). Mateo should check
+  whether Cloudflare's edge 403/1010s the Claude connector's UA on `/mcp`, and
+  record any accommodation. Do not weaken edge posture.
+- **Claude connector auth shape.** This build assumes Claude's custom
+  connector can send a static `Authorization: Bearer <agent token>` header
+  (spec's premise). If the connector only offers OAuth or no-auth, onboarding
+  needs a follow-up decision. `/mcp` deliberately exposes no OAuth metadata.
+- Origin-header checks were not added: every request needs a bearer token,
+  and browsers cannot attach one cross-origin without having it.
+- Live smoke (after deploy): `initialize` → `tools/list` (21) →
+  `tools/call get_activity` with a fresh agent token; then revoke it and
+  confirm `AUTH_TOKEN_REVOKED`.

@@ -187,3 +187,106 @@ export async function getStats(db) {
     decisions_open, agents_count,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Task 019: the read surface as one table.
+//
+// The REST router (index.mjs, GET /api/*) and the MCP tool catalog
+// (mcp.mjs) both dispatch through QUERIES, so a query's behavior, its
+// not-found contract, and its advertised input schema cannot drift apart.
+// Each run() returns the hub response envelope: { ok:true, ... } or
+// { ok:false, code, message }.
+// ---------------------------------------------------------------------------
+
+const taskNotFound = (task_id) => ({ ok: false, code: 'NOT_FOUND', message: `task ${task_id} not found` });
+
+const TASK_ID_PROP = { type: 'string', minLength: 1, description: 'Task id, e.g. "task_…".' };
+
+export const QUERIES = {
+  list_tasks: {
+    rest: 'GET /api/tasks',
+    description: 'List tasks, most recently updated first. Optional filters: status, assignee (agent_id).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', description: 'pending | claimed | in-progress | under-review | completed | blocked' },
+        assignee: { type: 'string', description: 'agent_id of the assignee' },
+        limit: { type: 'integer', description: 'Max rows (default 100, clamped to 1..200).' },
+      },
+    },
+    run: async (db, a) =>
+      ({ ok: true, ...(await listTasks(db, { status: a.status, assignee: a.assignee, limit: a.limit })) }),
+  },
+  get_task: {
+    rest: 'GET /api/tasks/{task_id}',
+    description: 'Get one task by task_id.',
+    inputSchema: { type: 'object', properties: { task_id: TASK_ID_PROP }, required: ['task_id'] },
+    run: async (db, a) => {
+      const task = await getTask(db, a.task_id);
+      return task ? { ok: true, task } : taskNotFound(a.task_id);
+    },
+  },
+  get_task_events: {
+    rest: 'GET /api/tasks/{task_id}/events',
+    description: 'Get a task\'s event log in seq order. Use after_seq as a cursor to fetch only newer events.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: TASK_ID_PROP,
+        after_seq: { type: 'integer', description: 'Return events with seq greater than this (default 0).' },
+        limit: { type: 'integer', description: 'Max rows (default 200, clamped to 1..500).' },
+      },
+      required: ['task_id'],
+    },
+    run: async (db, a) => {
+      const data = await getTaskEvents(db, a.task_id, { after_seq: a.after_seq, limit: a.limit });
+      return data ? { ok: true, ...data } : taskNotFound(a.task_id);
+    },
+  },
+  get_task_resume: {
+    rest: 'GET /api/tasks/{task_id}/resume',
+    description: 'Get the resume/handoff packet for a task: status, latest result and review, recent messages, '
+      + 'artifacts, open and resolved decisions, latest handoff, and block reason.',
+    inputSchema: { type: 'object', properties: { task_id: TASK_ID_PROP }, required: ['task_id'] },
+    run: async (db, a) => {
+      const resume = await getResume(db, a.task_id);
+      return resume ? { ok: true, resume } : taskNotFound(a.task_id);
+    },
+  },
+  get_activity: {
+    rest: 'GET /api/activity',
+    description: 'Recent events across the whole hub, newest first (includes Team chat message bodies). '
+      + 'Poll this to follow what the team is doing.',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'integer', description: 'Max rows (default 50, clamped to 1..200).' } },
+    },
+    run: async (db, a) => ({ ok: true, ...(await getActivity(db, { limit: a.limit })) }),
+  },
+  list_decisions: {
+    rest: 'GET /api/decisions',
+    description: 'List decisions requested of David, newest first. Optional state filter.',
+    inputSchema: {
+      type: 'object',
+      properties: { state: { type: 'string', description: 'requested | resolved' } },
+    },
+    run: async (db, a) => ({ ok: true, ...(await listDecisions(db, { state: a.state })) }),
+  },
+  list_agents: {
+    rest: 'GET /api/agents',
+    description: 'Live agent status projection: context_health, work_state, current_task_id per agent.',
+    inputSchema: { type: 'object', properties: {} },
+    run: async (db) => ({ ok: true, ...(await listAgents(db)) }),
+  },
+  get_stats: {
+    rest: 'GET /api/stats',
+    description: 'Hub volume indicators: event totals, events today, tasks by status, open decisions, agent count.',
+    inputSchema: { type: 'object', properties: {} },
+    run: async (db) => ({ ok: true, stats: await getStats(db) }),
+  },
+};
+
+/** Run one query by name. Returns the hub response envelope. */
+export function runQuery(db, name, args = {}) {
+  return QUERIES[name].run(db, args);
+}

@@ -22,6 +22,9 @@
 //   GET  /api/decisions        -> decisions (?state=requested|resolved)
 //   GET  /api/agents           -> live agent status projection
 //   GET  /api/stats            -> quota/what-we-control indicators (task 010)
+//   POST /mcp                  -> MCP server (task 019): JSON-RPC 2.0 over
+//                                 Streamable HTTP, stateless, agent bearer
+//                                 only; tools = the query + command surface
 //   GET  /                    -> dashboard HTML (David-only; task 010)
 //   GET  /dashboard            -> dashboard HTML (David-only)
 //   GET  /dashboard/app.js     -> dashboard JS (David-only)
@@ -40,10 +43,8 @@ import {
 } from './auth.mjs';
 import { executeCommand, COMMANDS } from './commands.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
-import {
-  listTasks, getTask, getTaskEvents, getResume,
-  getActivity, listDecisions, listAgents, getStats,
-} from './queries.mjs';
+import { runQuery } from './queries.mjs';
+import { handleJsonRpc } from './mcp.mjs';
 import { DASHBOARD_HTML, DASHBOARD_CSS, DASHBOARD_JS } from './dashboard.mjs';
 import { MANIFEST_JSON, iconBytes } from './icons.mjs';
 
@@ -168,6 +169,17 @@ export default {
         return await handleCommand(request, db);
       }
 
+      // -- MCP server (task 019) ----------------------------------------
+      // Streamable HTTP, stateless, POST only: no SSE stream is offered, so
+      // GET (and anything else) is 405 as the MCP transport spec requires.
+      if (path === '/mcp') {
+        if (request.method !== 'POST') {
+          return json({ ok: false, code: 'METHOD_NOT_ALLOWED', message: '/mcp accepts POST only' },
+            405, { allow: 'POST' });
+        }
+        return await handleMcp(request, db);
+      }
+
       // -- Query API (task 009) ----------------------------------------
       if (path.startsWith('/api/') && request.method === 'GET') {
         return await handleQuery(request, db, url);
@@ -263,31 +275,18 @@ async function handleCommand(request, db) {
     return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
   }
 
-  const key = principal.kind === 'david' ? 'david' : `agent:${principal.agent_id}`;
-  const rl = commandLimiter.check(key);
-  if (!rl.ok) {
-    return json({
-      ok: false, code: 'RATE_LIMITED',
-      message: `command rate limit exceeded; retry in ${Math.ceil(rl.retryAfterMs / 1000)}s`,
-      retryable: true, retry_after_ms: rl.retryAfterMs,
-    }, 429, { 'retry-after': String(Math.ceil(rl.retryAfterMs / 1000)) });
+  const limited = checkCommandRate(principal);
+  if (limited) {
+    return json(limited, 429, { 'retry-after': String(Math.ceil(limited.retry_after_ms / 1000)) });
   }
 
-  const contentLength = Number(request.headers.get('content-length') || 0);
-  if (contentLength > MAX_COMMAND_BYTES) {
+  const read = await readCappedBody(request);
+  if (read.tooLarge) {
     return json({ ok: false, code: 'VALIDATION_FAILED', message: 'command body exceeds 1 MiB' }, 400);
   }
-
   let body;
   try {
-    // Enforce the 1 MiB cap on actual bytes read, not just the header —
-    // a request without Content-Length must not bypass the contract.
-    // (ChatGPT 009 review, minor hardening.)
-    const text = await request.text();
-    if (new TextEncoder().encode(text).length > MAX_COMMAND_BYTES) {
-      return json({ ok: false, code: 'VALIDATION_FAILED', message: 'command body exceeds 1 MiB' }, 400);
-    }
-    body = JSON.parse(text);
+    body = JSON.parse(read.text ?? ''); // unreadable body -> parse error, as before 019
   } catch {
     return json({ ok: false, code: 'VALIDATION_FAILED', message: 'JSON body required' }, 400);
   }
@@ -297,56 +296,105 @@ async function handleCommand(request, db) {
   return json(result, commandHttpStatus(result.code));
 }
 
+// Per-principal command rate limit, shared by POST /api/commands and MCP
+// command tools (task 019) — one bucket per principal across both surfaces.
+// Returns null when allowed, or the hub RATE_LIMITED error body.
+function checkCommandRate(principal) {
+  const key = principal.kind === 'david' ? 'david' : `agent:${principal.agent_id}`;
+  const rl = commandLimiter.check(key);
+  if (rl.ok) return null;
+  return {
+    ok: false, code: 'RATE_LIMITED',
+    message: `command rate limit exceeded; retry in ${Math.ceil(rl.retryAfterMs / 1000)}s`,
+    retryable: true, retry_after_ms: rl.retryAfterMs,
+  };
+}
+
+// Read a request body under the 1 MiB cap. Returns { text } or
+// { tooLarge: true }; a body that cannot be read yields text: null.
+async function readCappedBody(request) {
+  const contentLength = Number(request.headers.get('content-length') || 0);
+  if (contentLength > MAX_COMMAND_BYTES) return { tooLarge: true };
+  let text;
+  try {
+    // Enforce the 1 MiB cap on actual bytes read, not just the header —
+    // a request without Content-Length must not bypass the contract.
+    // (ChatGPT 009 review, minor hardening.)
+    text = await request.text();
+  } catch {
+    return { text: null };
+  }
+  if (new TextEncoder().encode(text).length > MAX_COMMAND_BYTES) return { tooLarge: true };
+  return { text };
+}
+
+// -- MCP (task 019) ---------------------------------------------------------
+// POST /mcp: stateless MCP Streamable HTTP. Every request carries its own
+// agent bearer token and goes through the SAME authenticate() as the REST
+// API: invalid/revoked tokens throw AUTH_* into the fetch() catch, which
+// maps them to the same 401 bodies and feeds the same bearer brute-force
+// limiter. David's session cookie is deliberately not accepted here.
+async function handleMcp(request, db) {
+  const header = (request.headers.get('authorization') || '').trim();
+  if (!/^Bearer\s+/i.test(header)) {
+    // Without a bearer header authenticate() would fall back to the David
+    // session cookie — MCP clients are agents, so stop here instead.
+    return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
+  }
+  const principal = await authenticate(db, request);
+  if (!principal || principal.kind !== 'agent') {
+    return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
+  }
+
+  const read = await readCappedBody(request);
+  const res = await handleJsonRpc(db, principal, read.tooLarge ? { tooLarge: true } : read.text, {
+    checkCommandRate,
+    protocolVersion: request.headers.get('mcp-protocol-version'),
+  });
+  if (res.body === undefined) return new Response(null, { status: res.status });
+  return json(res.body, res.status);
+}
+
 async function handleQuery(request, db, url) {
   const principal = await authenticate(db, request);
   if (!principal) {
     return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
   }
 
+  const route = matchQueryRoute(url);
+  if (!route) {
+    return json({ ok: false, code: 'NOT_FOUND', message: `no route GET ${url.pathname}` }, 404);
+  }
+  // Task 019: one dispatch table (queries.mjs QUERIES) serves both REST and
+  // MCP, so the two surfaces cannot drift. Query failures are NOT_FOUND.
+  const result = await runQuery(db, route.name, route.args);
+  return json(result, result.ok ? 200 : 404);
+}
+
+// Map a GET /api/* path to a QUERIES entry plus its arguments. Query-string
+// values arrive as strings (or null when absent), exactly as before 019.
+function matchQueryRoute(url) {
   const segs = url.pathname.split('/').filter(Boolean); // ['api', ...]
   const q = (name) => url.searchParams.get(name);
 
   // GET /api/tasks
   if (segs.length === 2 && segs[1] === 'tasks') {
-    return json({ ok: true, ...(await listTasks(db, { status: q('status'), assignee: q('assignee'), limit: q('limit') })) });
+    return { name: 'list_tasks', args: { status: q('status'), assignee: q('assignee'), limit: q('limit') } };
   }
   // GET /api/tasks/{id}[/events|/resume]
   if (segs.length >= 3 && segs[1] === 'tasks') {
     const task_id = decodeURIComponent(segs[2]);
-    if (segs.length === 3) {
-      const task = await getTask(db, task_id);
-      if (!task) return json({ ok: false, code: 'NOT_FOUND', message: `task ${task_id} not found` }, 404);
-      return json({ ok: true, task });
-    }
+    if (segs.length === 3) return { name: 'get_task', args: { task_id } };
     if (segs.length === 4 && segs[3] === 'events') {
-      const data = await getTaskEvents(db, task_id, { after_seq: q('after_seq'), limit: q('limit') });
-      if (!data) return json({ ok: false, code: 'NOT_FOUND', message: `task ${task_id} not found` }, 404);
-      return json({ ok: true, ...data });
+      return { name: 'get_task_events', args: { task_id, after_seq: q('after_seq'), limit: q('limit') } };
     }
-    if (segs.length === 4 && segs[3] === 'resume') {
-      const resume = await getResume(db, task_id);
-      if (!resume) return json({ ok: false, code: 'NOT_FOUND', message: `task ${task_id} not found` }, 404);
-      return json({ ok: true, resume });
-    }
+    if (segs.length === 4 && segs[3] === 'resume') return { name: 'get_task_resume', args: { task_id } };
   }
-  // GET /api/activity
-  if (segs.length === 2 && segs[1] === 'activity') {
-    return json({ ok: true, ...(await getActivity(db, { limit: q('limit') })) });
-  }
-  // GET /api/decisions
-  if (segs.length === 2 && segs[1] === 'decisions') {
-    return json({ ok: true, ...(await listDecisions(db, { state: q('state') })) });
-  }
-  // GET /api/agents
-  if (segs.length === 2 && segs[1] === 'agents') {
-    return json({ ok: true, ...(await listAgents(db)) });
-  }
-  // GET /api/stats (task 010)
-  if (segs.length === 2 && segs[1] === 'stats') {
-    return json({ ok: true, stats: await getStats(db) });
-  }
-
-  return json({ ok: false, code: 'NOT_FOUND', message: `no route GET ${url.pathname}` }, 404);
+  if (segs.length === 2 && segs[1] === 'activity') return { name: 'get_activity', args: { limit: q('limit') } };
+  if (segs.length === 2 && segs[1] === 'decisions') return { name: 'list_decisions', args: { state: q('state') } };
+  if (segs.length === 2 && segs[1] === 'agents') return { name: 'list_agents', args: {} };
+  if (segs.length === 2 && segs[1] === 'stats') return { name: 'get_stats', args: {} }; // task 010
+  return null;
 }
 
 // Never leak internal principal fields to clients.
