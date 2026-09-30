@@ -32,10 +32,10 @@ import {
 // desktop/plugin connector mints a per-connection callback of the form
 // https://chatgpt.com/connector/oauth/<opaque-id>, which can never be
 // enumerated in advance, so it is accepted by predicate (exact host, exact
-// path prefix, one bounded opaque segment, https only, no userinfo / port /
-// query / fragment). The legacy fixed ChatGPT callback is also accepted.
-// Any other client (including Claude Code's loopback redirect) remains out
-// of scope and is refused at registration.
+// The legacy fixed ChatGPT callback is also accepted, as are RFC 8252 §7.3
+// loopback redirects (http://localhost:<port>/...) for native desktop
+// clients such as ChatGPT desktop. Any other client remains out of scope
+// and is refused at registration.
 export const ALLOWED_REDIRECT_URIS = [
   'https://claude.ai/api/mcp/auth_callback',
   'https://claude.com/api/mcp/auth_callback',
@@ -55,6 +55,26 @@ export function isChatGptCallback(uri) {
   return u.protocol === 'https:' && u.host === 'chatgpt.com'
     && !u.username && !u.password && !u.search && !u.hash
     && CHATGPT_DYNAMIC_CB_RE.test(u.pathname);
+}
+
+// True for RFC 8252 §7.3 loopback redirects used by native desktop clients
+// (ChatGPT desktop binds an ephemeral port and sends
+// http://localhost:<port>/callback). http only, loopback host only, any port,
+// bounded path, no userinfo / query / fragment. The redirect can only reach
+// the user's own machine, so this is the standard native-app pattern.
+// Exported for tests.
+export function isLoopbackRedirect(uri) {
+  let u;
+  try {
+    u = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:') return false;
+  const host = u.hostname.toLowerCase();
+  if (host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]') return false;
+  if (u.username || u.password || u.search || u.hash) return false;
+  return u.pathname.length > 0 && u.pathname.length <= 200;
 }
 
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -173,7 +193,7 @@ async function register(request, db, now) {
     return oauthError('invalid_redirect_uri', 'redirect_uris is required');
   }
   for (const uri of redirect_uris) {
-    if (!ALLOWED_REDIRECT_URIS.includes(uri) && !isChatGptCallback(uri)) {
+    if (!ALLOWED_REDIRECT_URIS.includes(uri) && !isChatGptCallback(uri) && !isLoopbackRedirect(uri)) {
       return oauthError('invalid_redirect_uri', `redirect_uri not allowed: ${String(uri).slice(0, 200)}`);
     }
   }
@@ -611,7 +631,8 @@ export async function handleOAuth(request, env, db, url, { onTokenFailure, onUna
       || path === `/.well-known/oauth-protected-resource${MCP_PATH}`)) {
     return json(protectedResourceMetadata(origin));
   }
-  if (method === 'GET' && path === '/.well-known/oauth-authorization-server') {
+  if (method === 'GET' && (path === '/.well-known/oauth-authorization-server'
+      || path === `/.well-known/oauth-authorization-server${MCP_PATH}`)) {
     return json(authorizationServerMetadata(origin));
   }
   if (path === '/oauth/register') {
