@@ -216,3 +216,40 @@ task is needed.** Live confirmation is still part of Mateo's verification.
 - **Consent-page redirect:** `form-action` in the CSP lists
   `https://claude.ai` and `https://claude.com`, so the post-approval 302 is
   allowed. Verify this on iPhone Safari during the live check.
+
+---
+
+# Review + deploy record (Mateo, 2026-09-30)
+
+## Review verdict: APPROVED (merged as f976cdd, pushed to main)
+
+- Tests: 207/207 green (179 baseline + 28 new OAuth tests).
+- Code review (oauth.mjs, index.mjs wiring, 0003 migration): PKCE S256
+  required and verified with timing-safe compare; client + redirect_uri
+  verified before any redirect; David-only consent via existing GitHub
+  OAuth + DAVID_GITHUB_ID allowlist; per-render CSRF token stored hashed;
+  agent_id typed by David, bound to the code, token endpoint takes the
+  agent only from the approved code; ordinary-agent-only issuance (role
+  'agent', enabled); single-use claim nonces on requests/codes/refresh;
+  code replay and refresh reuse revoke the whole family; refresh refuses
+  to re-mint if David revoked the access token; hash-only storage for
+  codes/refresh; consent page escaped + CSP (form-action includes the
+  Claude origins) + X-Frame-Options DENY; metadata per RFC 9728/8414;
+  public clients only (auth method none); redirect allowlist is exactly
+  the two Claude web callbacks; token failures share the bearer-fail
+  limiter; open write endpoints capped per IP. No new dependencies, no
+  secrets in code, additive-only migration.
+- Signed off the tighter-than-spec choices: Claude-only callback
+  allowlist (breaks visibly, not silently, if Anthropic changes URLs);
+  ordinary-agent tokens only; no access-token expiry (consistent with
+  0002 — ends via rotation, family revoke, or David's revoke).
+
+## Deploy status: BLOCKED on migration 0003 (needs David)
+
+- `ai-hub-deploy.py d1-migrate` fails: the `custom.cloudflare` API token
+  has no D1 scope (`/d1/database` → 401; query → 403/7403). Token verify
+  itself is 200 and worker uploads work — the token is Workers-scoped only.
+- Lesson: future D1 migrations need David via the dashboard (or a wider
+  token). Recorded in AGENTS.md.
+- Worker NOT deployed yet — keeping code and schema in sync. Deploy +
+  live verify proceed after David runs 0003 in the D1 console.
