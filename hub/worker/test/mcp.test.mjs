@@ -13,7 +13,8 @@ import { QUERIES } from '../src/queries.mjs';
 import { handleJsonRpc, MCP_SERVER_INFO, MCP_PROTOCOL_VERSIONS } from '../src/mcp.mjs';
 
 const SCHEMA = readFileSync(new URL('../../db/migrations/0001_schema.sql', import.meta.url), 'utf8')
-  + readFileSync(new URL('../../db/migrations/0002_auth.sql', import.meta.url), 'utf8');
+  + readFileSync(new URL('../../db/migrations/0002_auth.sql', import.meta.url), 'utf8')
+  + readFileSync(new URL('../../db/migrations/0003_mcp_oauth.sql', import.meta.url), 'utf8');
 const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
 const ENV_BASE = {

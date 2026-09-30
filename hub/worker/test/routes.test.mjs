@@ -9,7 +9,8 @@ import { openDb, applySchema } from '../src/sqlite-db.mjs';
 import handler from '../src/index.mjs';
 
 const SCHEMA = readFileSync(new URL('../../db/migrations/0001_schema.sql', import.meta.url), 'utf8')
-  + readFileSync(new URL('../../db/migrations/0002_auth.sql', import.meta.url), 'utf8');
+  + readFileSync(new URL('../../db/migrations/0002_auth.sql', import.meta.url), 'utf8')
+  + readFileSync(new URL('../../db/migrations/0003_mcp_oauth.sql', import.meta.url), 'utf8');
 
 const ENV_BASE = {
   GITHUB_CLIENT_ID: 'test-client-id',

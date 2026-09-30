@@ -24,7 +24,16 @@
 //   GET  /api/stats            -> quota/what-we-control indicators (task 010)
 //   POST /mcp                  -> MCP server (task 019): JSON-RPC 2.0 over
 //                                 Streamable HTTP, stateless, agent bearer
-//                                 only; tools = the query + command surface
+//                                 only; tools = the query + command surface.
+//                                 401s carry WWW-Authenticate (task 020)
+//   GET  /.well-known/oauth-protected-resource[/mcp] -> RFC 9728 (task 020)
+//   GET  /.well-known/oauth-authorization-server     -> RFC 8414 (task 020)
+//   POST /oauth/register       -> RFC 7591 client registration (task 020)
+//   GET  /oauth/authorize      -> PKCE authorize; David signs in via GitHub
+//                                 and approves an agent_id (task 020)
+//   POST /oauth/authorize      -> David's consent decision (task 020)
+//   POST /oauth/token          -> code exchange / refresh rotation; issues
+//                                 ordinary agent bearer tokens (task 020)
 //   GET  /                    -> dashboard HTML (David-only; task 010)
 //   GET  /dashboard            -> dashboard HTML (David-only)
 //   GET  /dashboard/app.js     -> dashboard JS (David-only)
@@ -45,6 +54,7 @@ import { executeCommand, COMMANDS } from './commands.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { runQuery } from './queries.mjs';
 import { handleJsonRpc } from './mcp.mjs';
+import { handleOAuth, oauthResumeUrlForGithubState, mcpWwwAuthenticate, MCP_PATH } from './oauth.mjs';
 import { DASHBOARD_HTML, DASHBOARD_CSS, DASHBOARD_JS } from './dashboard.mjs';
 import { MANIFEST_JSON, iconBytes } from './icons.mjs';
 
@@ -93,8 +103,26 @@ export default {
           code: url.searchParams.get('code'),
           state: url.searchParams.get('state'),
         });
+        // Task 020: a login started by /oauth/authorize returns David to
+        // the MCP consent screen. Any other login is unchanged.
+        const resumeUrl = await oauthResumeUrlForGithubState(db, url.searchParams.get('state'), url.origin);
+        if (resumeUrl) {
+          return new Response(null, {
+            status: 302,
+            headers: { location: resumeUrl, 'set-cookie': setCookie, 'cache-control': 'no-store' },
+          });
+        }
         return json({ ok: true, github_user_id }, 200, { 'set-cookie': setCookie });
       }
+
+      // -- OAuth 2.1 for the MCP connector (task 020) --------------------
+      // Metadata, registration, authorize/consent, token. Issues ordinary
+      // agent bearer tokens; /mcp keeps authenticating them unchanged.
+      const oauthResponse = await handleOAuth(request, env, db, url, {
+        onTokenFailure: noteTokenEndpointFailure,
+        onUnauthenticatedWrite: limitOAuthOpenWrite,
+      });
+      if (oauthResponse) return oauthResponse;
 
       if (path === '/auth/logout' && request.method === 'POST') {
         const { clearCookie } = await logout(db, request);
@@ -236,6 +264,11 @@ export default {
             }, 429, { 'retry-after': String(Math.ceil(brl.retryAfterMs / 1000)) });
           }
         }
+        // Task 020: /mcp 401s carry the RFC 9728 discovery pointer so an
+        // OAuth client (Claude's connector) can find the sign-in flow.
+        if (path === MCP_PATH && authHttpStatus(e) === 401) {
+          return withMcpChallenge(authError(e), url.origin);
+        }
         return authError(e);
       }
       console.error('unhandled worker error:', e);
@@ -268,6 +301,37 @@ const commandLimiter = createRateLimiter({ limit: 120, windowMs: 60_000 });
 // and successful authentications never increment the counter.
 const bearerFailLimiter = createRateLimiter({ limit: 20, windowMs: 60_000 });
 const BEARER_FAIL_CODES = new Set(['AUTH_BAD_TOKEN', 'AUTH_TOKEN_REVOKED', 'AUTH_AGENT_DISABLED']);
+
+// Task 020: failed /oauth/token requests (bad code, PKCE, refresh token,
+// client) share the bearer brute-force bucket per client IP. Returns a 429
+// Response when over the limit, else null.
+async function noteTokenEndpointFailure(request) {
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  const brl = bearerFailLimiter.check(`bearer-fail:${ip}`);
+  if (brl.ok) return null;
+  return json({
+    error: 'temporarily_unavailable',
+    error_description: `too many failed authentication attempts; retry in ${Math.ceil(brl.retryAfterMs / 1000)}s`,
+  }, 429, { 'retry-after': String(Math.ceil(brl.retryAfterMs / 1000)), 'cache-control': 'no-store' });
+}
+
+// Task 020: open OAuth endpoints that write rows (client registration, new
+// authorize requests) are capped per client IP so they cannot be used to
+// burn the D1 write quota.
+const oauthOpenLimiter = createRateLimiter({ limit: 30, windowMs: 60_000 });
+async function limitOAuthOpenWrite(request) {
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  const rl = oauthOpenLimiter.check(`oauth-open:${ip}`);
+  if (rl.ok) return null;
+  return json({ error: 'temporarily_unavailable', error_description: 'too many requests' },
+    429, { 'retry-after': String(Math.ceil(rl.retryAfterMs / 1000)) });
+}
+
+// Add the MCP OAuth discovery challenge to a /mcp 401 response.
+function withMcpChallenge(response, origin) {
+  response.headers.set('www-authenticate', mcpWwwAuthenticate(origin));
+  return response;
+}
 
 async function handleCommand(request, db) {
   const principal = await authenticate(db, request);
@@ -339,11 +403,13 @@ async function handleMcp(request, db) {
   if (!/^Bearer\s+/i.test(header)) {
     // Without a bearer header authenticate() would fall back to the David
     // session cookie — MCP clients are agents, so stop here instead.
-    return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
+    return withMcpChallenge(json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401),
+      new URL(request.url).origin);
   }
   const principal = await authenticate(db, request);
   if (!principal || principal.kind !== 'agent') {
-    return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
+    return withMcpChallenge(json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401),
+      new URL(request.url).origin);
   }
 
   const read = await readCappedBody(request);

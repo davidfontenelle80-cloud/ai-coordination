@@ -74,3 +74,145 @@ bearer-only `/mcp` path from 019 stay exactly as they are.
   or live verification; merging to main.
 - Mateo retains review, deployment, and live verification after the branch
   is ready. This is a security-sensitive build — expect a hard review.
+
+---
+
+# Build record (builder: Claude, branch `codex/task-020-mcp-oauth`)
+
+## Transport finding (the `/sse` placeholder)
+Anthropic's connector docs ("Build an MCP server for Claude" and
+"Authentication for connectors", claude.com/docs/connectors/building)
+say remote connectors should use **Streamable HTTP**. Claude also still
+supports legacy HTTP+SSE, which is being deprecated. Our POST-only `/mcp`
+(GET → 405 per the Streamable HTTP spec) is therefore compatible. The
+`/sse` in the dialog is only a placeholder. David enters
+`https://ai-hub.davidfontenelle80.workers.dev/mcp`. **No SSE follow-up
+task is needed.** Live confirmation is still part of Mateo's verification.
+
+## Decisions and changes
+- New `hub/worker/src/oauth.mjs`, wired into `index.mjs` via
+  `handleOAuth()`. New additive migration `0003_mcp_oauth.sql`:
+  `oauth_clients`, `oauth_authorize_requests`, `oauth_codes`,
+  `oauth_refresh_tokens`. The 0001/0002 tables are unchanged.
+- Endpoints: `GET /.well-known/oauth-protected-resource[/mcp]` (RFC 9728;
+  `resource` = `<origin>/mcp`, `authorization_servers` = `[<origin>]`),
+  `GET /.well-known/oauth-authorization-server` (RFC 8414; S256 only,
+  `token_endpoint_auth_methods_supported: ["none"]`, RFC 9207 `iss`),
+  `POST /oauth/register` (RFC 7591), `GET|POST /oauth/authorize`,
+  `POST /oauth/token` (form-encoded; `authorization_code`, `refresh_token`).
+- `/mcp` discovery: Claude requires a 401 carrying
+  `WWW-Authenticate: Bearer resource_metadata="…"`. This header is added to
+  `/mcp` 401s only. The bodies, status codes, bearer-only rule, and cookie
+  refusal from 019 are unchanged.
+- Registration: public clients only, since the docs say DCR registers
+  Claude as a public client. Redirect URIs must exactly match
+  `https://claude.ai/api/mcp/auth_callback` or the documented future
+  `https://claude.com/api/mcp/auth_callback`. Claude Code's loopback
+  redirect and any other client are refused (spec: non-Claude clients NOT
+  STARTED).
+- Authorize: client and redirect_uri are verified before any redirect.
+  `response_type=code`, PKCE `S256` (plain refused), and `resource` must
+  match `/mcp` when sent. Pending requests expire after 10 minutes.
+  - **David's identity:** if no David session exists, the flow goes through
+    the existing `beginGitHubLogin` (same GitHub app and `DAVID_GITHUB_ID`
+    allowlist). The GitHub callback redirects back to consent **only** when
+    its state was started by `/oauth/authorize`. Plain dashboard logins
+    still get the JSON body. A non-David GitHub user gets the existing 403
+    `AUTH_NOT_ALLOWLISTED`.
+  - **Consent (token binding, Mateo's point b):** David-only page (CSP,
+    `frame-ancestors 'none'`, no-store, escaped output). It shows the client
+    name, the redirect host, and a warning. David must **type the agent_id**:
+    there is no prefill, and the field is validated
+    `^[a-z0-9][a-z0-9_-]{0,63}$`. Only role-`agent` identities are allowed;
+    Mateo-role or disabled ids are refused with a re-rendered form. A fresh
+    CSRF token is issued per render and stored hashed. The consent is
+    single-use via a claim nonce.
+- Token: public client identified by `client_id`. The code is claimed
+  before validation, so a failed PKCE check burns it.
+  - **agent_id comes only from the approved code.** Any client-sent
+    agent_id is ignored, and refreshes keep the family's agent_id.
+  - The access token is minted by the unchanged `issueAgentToken()`
+    (`created_by = 'david-oauth'`, role `agent`). It is a normal hub token,
+    listed in David's token inventory and revocable there.
+- Hygiene:
+  - Codes are single-use with a 10-minute expiry. A replay revokes
+    everything issued from that code.
+  - Refresh tokens (`hrt_…`, 30 days) are rotated on every use, with
+    rotate-before-revoke for the old access token. Reuse of a spent token
+    revokes the whole family.
+  - Refusing to refresh a token David revoked in the dashboard ends the
+    family.
+  - Codes and refresh tokens are stored as SHA-256 only. Token responses
+    are `no-store`. Tokens are never logged.
+  - Token-endpoint failures share the bearer brute-force bucket (per IP).
+    Open row-writing endpoints (register, new authorize) are capped at 30
+    per minute per IP.
+- No `expires_in`: `authenticate()` and 0002 are unchanged by mandate, so
+  hub tokens carry no expiry. Access ends through rotation, family
+  revocation, or David's revoke. Claude refreshes reactively on 401.
+
+## Validation
+- 179/179 baseline → **207/207** (`npm test` in hub). There are 28 new
+  dependency-free tests in `hub/worker/test/oauth.test.mjs`:
+  - metadata at both PRM paths plus AS metadata;
+  - the `/mcp` 401 challenge, with the 019 body unchanged;
+  - registration allowlist (evil, loopback, empty, and non-array refused);
+  - **full round trip**: register → authorize → GitHub (David) → consent →
+    PKCE exchange → `initialize` + `tools/call get_activity`, with the token
+    stored hash-only as `david-oauth` and nothing plaintext in the OAuth
+    tables;
+  - consent escaping, and direct consent when David is already signed in;
+  - **binding**: `/auth/me` = `claude`/`agent`; a client-sent `agent_id` is
+    ignored; `create_task`/`resolve_decision` return FORBIDDEN;
+    `set_agent_status` "as chatgpt" is recorded as claude; claiming for
+    chatgpt returns FORBIDDEN; messages are attributed to claude; the
+    refreshed token is still claude; two approvals bind to two agents;
+    empty/Mateo/malformed agent_ids issue no code;
+  - **failures**: non-David GitHub user; missing session, forged CSRF, or
+    agent bearer on consent; consent single-use; deny → `access_denied`;
+    unknown client or unregistered redirect never redirects; missing/plain
+    PKCE and wrong resource; PKCE failure burns the code; code replay
+    revokes the first tokens; expired code; wrong client or redirect;
+    expired consent; unsupported grant; 429 after 20 failures (shared with
+    `/mcp`);
+  - **refresh**: rotation, family revocation on reuse, a dashboard-revoked
+    token cannot be refreshed, and refresh tokens are client-bound;
+  - `/mcp` still refuses David's cookie, and a plain dashboard login is
+    unchanged.
+- Mutation check: disabling PKCE or taking agent_id from the token request
+  each fails the suite. Removing the explicit reuse check does not, because
+  the rotation revoke plus the "current access token revoked → end family"
+  check still kills the family. The two checks are redundant by design.
+- `node --check` passes on all source and test files (no linter in repo).
+- No new dependency, paid resource, billing profile, or payment method. No
+  secret committed: the flow needs no new env var or secret.
+
+## Open items for Mateo's review
+- **Deploy step:** apply migration 0003 (`wrangler d1 migrations apply`)
+  before deploying the worker.
+- **Live check:**
+  1. Add a connector with URL `…/mcp` and sign-in on, leaving the client
+     fields blank so DCR is used.
+  2. Expect GitHub login, then consent: type `claude` and Approve.
+  3. In Claude, confirm 21 tools and a `get_activity` call.
+  4. Revoke the token in the dashboard. The next use should fail, and
+     Claude's refresh should also fail (`invalid_grant`).
+  - Anthropic egress is `160.79.104.0/21`. Check that the Cloudflare edge
+    doesn't 403/1010 its requests to `/.well-known/*`, `/oauth/*`, or
+    `/mcp`, and record any accommodation.
+- **Shared rate-limit IP:** all Claude users egress from Anthropic's range,
+  so another Claude user hammering `/oauth/token` could briefly throttle our
+  connector (per-isolate, 60 s window). This is accepted per spec
+  ("shares the brute-force limiter").
+- **Open registration:** DCR is open, but only Claude callbacks can be
+  registered, and nothing is issued without David's typed consent. Rows are
+  not garbage-collected yet (expired authorize requests, codes, clients).
+  This is fine at our volume; a cleanup task could come later.
+- **Token lifetime:** there is no access-token expiry (a constraint of the
+  unchanged 0002/`authenticate()`). A later task could add a TTL if wanted.
+- **Consent phishing:** an attacker's crafted authorize link would still
+  show David the consent page. The warning text and the typed agent_id are
+  the defense, so David should approve only right after clicking Connect.
+- **Consent-page redirect:** `form-action` in the CSP lists
+  `https://claude.ai` and `https://claude.com`, so the post-approval 302 is
+  allowed. Verify this on iPhone Safari during the live check.
