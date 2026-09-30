@@ -1,7 +1,7 @@
 ---
 id: 015
 title: Chat-style thread UI + iPhone home-screen icon
-state: in-progress
+state: done
 owner: mateo
 created: 2026-09-30
 updated: 2026-09-30
