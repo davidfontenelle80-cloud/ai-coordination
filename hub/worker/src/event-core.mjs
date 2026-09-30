@@ -41,7 +41,8 @@
 //   * The event payload contains everything needed to reproduce the derived
 //     status; replays must reproduce the identical projection state.
 
-import { randomUUID } from 'node:crypto';
+// Web Crypto is native in both Workers and node 22 — no node: import needed.
+const randomUUID = () => crypto.randomUUID();
 
 export const SCHEMA_VERSION = 1;
 
