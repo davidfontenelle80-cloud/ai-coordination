@@ -325,3 +325,12 @@ David pasted a prompt to Claude; Claude reported via the connector:
 - Remaining optional proofs: authenticated MCP write with `claude`
   attribution (write → read → reload), and the dashboard revocation test
   (revoke Claude's token → refresh fails).
+
+## Identity audit (2026-09-30 ~14:03 EDT)
+
+D1 `agent_identities` holds exactly 3 rows, all role `agent`, none disabled:
+`claude`, `claufe` (typo from a consent approval — inert), `mateo-watcher`.
+There is NO `mateo`-role identity: the "Mateo watcher token" is agent-role,
+so Mateo currently cannot createTask/setPriority (both lead-only). Structural
+gap vs the design (Mateo leads): needs a mateo-role token issued by David,
+or David keeps creating tasks. David's decision pending.
