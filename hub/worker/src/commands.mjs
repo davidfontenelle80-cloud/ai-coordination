@@ -11,7 +11,7 @@
  * body (ChatGPT's 008 boundary).
  */
 
-import { appendEvent } from './event-core.mjs';
+import { appendEvent, MESSAGE_KINDS, CONTEXT_HEALTHS, WORK_STATES } from './event-core.mjs';
 import { authorize, principalIdentity } from './auth.mjs';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,28 @@ function cmdErr(code, message, extra) {
 
 function nonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
+}
+
+function isPlainObject(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+// The command layer is the public API contract: builders fully validate
+// payload shape here, before constructing an event. That makes the
+// appendEvent invariant true — VALIDATION_FAILED from the core is a
+// state-dependent rejection (state machine, rival claim, missing row),
+// never malformed input — so mapping it to INVALID_TRANSITION is
+// defensible. (ChatGPT 009 re-review blocker.)
+function requireAgentId(value, command) {
+  if (value !== undefined && value !== null && !nonEmptyString(value)) {
+    throw cmdErr('VALIDATION_FAILED', `${command} agent_id must be a non-empty string`);
+  }
+}
+
+function requireReasonString(input, command) {
+  if (input.reason !== undefined && input.reason !== null && typeof input.reason !== 'string') {
+    throw cmdErr('VALIDATION_FAILED', `${command} reason must be a string`);
+  }
 }
 
 function isOrdinaryAgent(principal) {
@@ -94,6 +116,15 @@ function httpsUrl(v) {
 async function buildCreateTask(db, input, ident) {
   if (!nonEmptyString(input.title)) throw cmdErr('VALIDATION_FAILED', 'createTask requires title');
   if (!nonEmptyString(input.goal)) throw cmdErr('VALIDATION_FAILED', 'createTask requires goal');
+  // A caller-supplied task_id or priority that is malformed is rejected,
+  // not silently replaced: bad input must not quietly change meaning.
+  // (ChatGPT 009 re-review.)
+  if (input.task_id !== undefined && input.task_id !== null && !nonEmptyString(input.task_id)) {
+    throw cmdErr('VALIDATION_FAILED', 'createTask task_id must be a non-empty string');
+  }
+  if (input.priority !== undefined && input.priority !== null && !nonEmptyString(input.priority)) {
+    throw cmdErr('VALIDATION_FAILED', 'createTask priority must be a non-empty string');
+  }
   return {
     event_type: 'task.created',
     task_id: nonEmptyString(input.task_id) ? input.task_id : genId('task'),
@@ -127,6 +158,7 @@ async function buildClaimTask(db, input, ident, principal) {
   if (isOrdinaryAgent(principal) && task.status !== 'pending') {
     throw cmdErr('FORBIDDEN', `claimTask is only available on pending tasks; task ${task.task_id} is ${task.status}`);
   }
+  requireReasonString(input, 'claimTask');
   return {
     event_type: 'task.changed',
     task_id: task.task_id,
@@ -137,6 +169,7 @@ async function buildClaimTask(db, input, ident, principal) {
 async function buildStartTask(db, input, ident, principal) {
   const task = await getTaskRow(db, input.task_id);
   requireAssigned(principal, task, 'startTask');
+  requireReasonString(input, 'startTask');
   return {
     event_type: 'task.changed',
     task_id: task.task_id,
@@ -147,6 +180,7 @@ async function buildStartTask(db, input, ident, principal) {
 async function buildBlockTask(db, input, ident, principal) {
   const task = await getTaskRow(db, input.task_id);
   requireAssigned(principal, task, 'blockTask');
+  requireReasonString(input, 'blockTask');
   return {
     event_type: 'task.changed',
     task_id: task.task_id,
@@ -156,8 +190,16 @@ async function buildBlockTask(db, input, ident, principal) {
 
 async function buildPostMessage(db, input) {
   const task = await getTaskRow(db, input.task_id);
-  const kind = input.kind || 'message';
+  // kind is an enum, not free text: validate it at the boundary so the
+  // core never sees a malformed kind. (ChatGPT 009 re-review blocker.)
+  const kind = input.kind === undefined || input.kind === null ? 'message' : input.kind;
+  if (!MESSAGE_KINDS.includes(kind)) {
+    throw cmdErr('VALIDATION_FAILED', `postMessage kind must be one of ${MESSAGE_KINDS.join(', ')}`);
+  }
   if (!nonEmptyString(input.body)) throw cmdErr('VALIDATION_FAILED', 'postMessage requires body');
+  if (input.reply_to !== undefined && input.reply_to !== null && !nonEmptyString(input.reply_to)) {
+    throw cmdErr('VALIDATION_FAILED', 'postMessage reply_to must be a non-empty string');
+  }
   return {
     event_type: 'message.posted',
     task_id: task.task_id,
@@ -183,6 +225,11 @@ async function buildSubmitResult(db, input, ident, principal) {
       }
     }
   }
+  // evidence must be an object (or null): validate here, not in the core.
+  // (ChatGPT 009 re-review blocker.)
+  if (input.evidence !== undefined && input.evidence !== null && !isPlainObject(input.evidence)) {
+    throw cmdErr('VALIDATION_FAILED', 'submitResult evidence must be an object');
+  }
   return {
     event_type: 'result.submitted',
     task_id: task.task_id,
@@ -198,6 +245,9 @@ async function buildRecordReview(db, input) {
   const task = await getTaskRow(db, input.task_id);
   if (input.outcome !== 'accepted' && input.outcome !== 'rework') {
     throw cmdErr('VALIDATION_FAILED', 'recordReview outcome must be accepted or rework');
+  }
+  if (input.notes !== undefined && input.notes !== null && typeof input.notes !== 'string') {
+    throw cmdErr('VALIDATION_FAILED', 'recordReview notes must be a string');
   }
   // Review linkage is server-derived from the task's current result, never
   // caller-supplied: the server knows which result is under review, so an
@@ -222,6 +272,11 @@ async function buildRequestDecision(db, input, ident, principal) {
     requireAssigned(principal, task, 'requestDecision');
   }
   if (!nonEmptyString(input.question)) throw cmdErr('VALIDATION_FAILED', 'requestDecision requires question');
+  // options must be an array when present: validate at the boundary.
+  // (ChatGPT 009 re-review blocker.)
+  if (input.options !== undefined && !Array.isArray(input.options)) {
+    throw cmdErr('VALIDATION_FAILED', 'requestDecision options must be an array');
+  }
   return {
     event_type: 'decision.changed',
     ...(input.task_id ? { task_id: input.task_id } : {}),
@@ -259,8 +314,22 @@ async function buildPostHandoff(db, input, ident, principal) {
     requireAssigned(principal, task, 'postHandoff');
   }
   if (!nonEmptyString(input.goal)) throw cmdErr('VALIDATION_FAILED', 'postHandoff requires goal');
+  // Handoff payload shape is validated at the boundary: done/pending/
+  // references are arrays, key_context/reason are strings.
+  // (ChatGPT 009 re-review blocker.)
+  for (const f of ['done', 'pending', 'references']) {
+    if (input[f] !== undefined && !Array.isArray(input[f])) {
+      throw cmdErr('VALIDATION_FAILED', `postHandoff ${f} must be an array`);
+    }
+  }
+  for (const f of ['key_context', 'reason']) {
+    if (input[f] !== undefined && input[f] !== null && typeof input[f] !== 'string') {
+      throw cmdErr('VALIDATION_FAILED', `postHandoff ${f} must be a string`);
+    }
+  }
   // A handoff describes the poster's own state: ordinary agents cannot file
   // one as somebody else.
+  requireAgentId(input.agent_id, 'postHandoff');
   const agent_id = isOrdinaryAgent(principal) ? ident.actor_id : (input.agent_id || ident.actor_id);
   return {
     event_type: 'handoff.posted',
@@ -289,6 +358,13 @@ async function buildAttachArtifact(db, input, ident, principal) {
   if (!httpsUrl(input.uri)) {
     throw cmdErr('VALIDATION_FAILED', 'attachArtifact requires an https: uri');
   }
+  // mime_type/sha256 are non-empty strings when present — truthiness is
+  // not validation. (ChatGPT 009 re-review blocker.)
+  for (const f of ['mime_type', 'sha256']) {
+    if (input[f] !== undefined && input[f] !== null && !nonEmptyString(input[f])) {
+      throw cmdErr('VALIDATION_FAILED', `attachArtifact ${f} must be a non-empty string`);
+    }
+  }
   return {
     event_type: 'artifact.attached',
     ...(input.task_id ? { task_id: input.task_id } : {}),
@@ -304,11 +380,22 @@ async function buildAttachArtifact(db, input, ident, principal) {
 
 async function buildSetAgentStatus(db, input, ident, principal) {
   // Ordinary agents can only report their own status.
+  requireAgentId(input.agent_id, 'setAgentStatus');
   const agent_id = isOrdinaryAgent(principal) ? ident.actor_id : (input.agent_id || ident.actor_id);
-  if (!nonEmptyString(input.context_health)) throw cmdErr('VALIDATION_FAILED', 'setAgentStatus requires context_health');
-  if (!nonEmptyString(input.work_state)) throw cmdErr('VALIDATION_FAILED', 'setAgentStatus requires work_state');
+  // context_health and work_state are enums, not free text: an unknown
+  // value is malformed input, not a state transition.
+  // (ChatGPT 009 re-review blocker.)
+  if (!CONTEXT_HEALTHS.includes(input.context_health)) {
+    throw cmdErr('VALIDATION_FAILED', `setAgentStatus context_health must be one of ${CONTEXT_HEALTHS.join(', ')}`);
+  }
+  if (!WORK_STATES.includes(input.work_state)) {
+    throw cmdErr('VALIDATION_FAILED', `setAgentStatus work_state must be one of ${WORK_STATES.join(', ')}`);
+  }
   if (!('current_task_id' in input)) {
     throw cmdErr('VALIDATION_FAILED', 'setAgentStatus requires current_task_id (string or null)');
+  }
+  if (input.current_task_id !== null && !nonEmptyString(input.current_task_id)) {
+    throw cmdErr('VALIDATION_FAILED', 'setAgentStatus current_task_id must be a string or null');
   }
   return {
     event_type: 'agent.status_changed',
@@ -365,12 +452,14 @@ function mapAppendFailure(res, command, task_id) {
         retryable: false,
         ...(m ? { conflicting_assignee: JSON.parse(m[1]) } : {}), ...extra };
     }
-    // Everything else the core rejects at append time is a state-machine
-    // violation, not bad input: builders already validated input shape, so
-    // the JSON was fine and the task/decision's current state forbids the
-    // operation. Blindly retrying the identical request can never succeed —
-    // retryable:false — while a stale client view surfaces separately as
-    // VERSION_CONFLICT (retryable after refresh). (ChatGPT 009 review #5.)
+    // Builders fully validate payload shape at the command boundary, so a
+    // core VALIDATION_FAILED at append time is a state-machine violation,
+    // not bad input: the JSON was fine and the task/decision's current
+    // state forbids the operation. Blindly retrying the identical request
+    // can never succeed — retryable:false — while a stale client view
+    // surfaces separately as VERSION_CONFLICT (retryable after refresh).
+    // (ChatGPT 009 review #5; re-review blocker resolved by completing
+    // builder validation.)
     return { ok: false, code: 'INVALID_TRANSITION', message: res.message, retryable: false, ...extra };
   }
   return { ok: false, code: res.code || 'COMMAND_FAILED', message: res.message || 'command failed', retryable: false, ...extra };
@@ -458,6 +547,12 @@ export async function executeCommand(db, principal, rawInput, { now = Date.now()
   eventInput.submitted_by = ident.submitted_by;
   eventInput.idempotency_key = input.idempotency_key;
   if (input.expected_task_version !== undefined) {
+    // Optimistic-concurrency guard is validated at the boundary too: a
+    // malformed version is bad input, not a state transition.
+    if (!Number.isInteger(input.expected_task_version) || input.expected_task_version < 0) {
+      return { ok: false, code: 'VALIDATION_FAILED',
+        message: 'expected_task_version must be a non-negative integer', retryable: false };
+    }
     eventInput.expected_task_version = input.expected_task_version;
   }
 

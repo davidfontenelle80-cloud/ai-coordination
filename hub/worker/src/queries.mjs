@@ -89,18 +89,16 @@ export async function getResume(db, task_id) {
   let blockedReason = null;
   if (task.status === 'blocked') {
     // The LATEST status change, not the latest task.changed of any kind: a
-    // later priority/assignee change must not erase the block reason.
-    // (ChatGPT 009 review.)
-    const changes = await db.queryAll(
+    // later priority/assignee change must not erase the block reason. Query
+    // specifically for status-change payloads via JSON extraction, so the
+    // answer is exact no matter how many later non-status events exist —
+    // no arbitrary scan limit. (ChatGPT 009 review + re-review.)
+    const row = await db.queryOne(
       `SELECT payload FROM events
-       WHERE task_id = ? AND event_type = 'task.changed' ORDER BY seq DESC LIMIT 50`, [task_id]);
-    for (const row of changes) {
-      const p = parseJson(row.payload, {});
-      if (p && p.field === 'status') {
-        blockedReason = p.reason || null;
-        break;
-      }
-    }
+       WHERE task_id = ? AND event_type = 'task.changed'
+         AND json_extract(payload, '$.field') = 'status'
+       ORDER BY seq DESC LIMIT 1`, [task_id]);
+    if (row) blockedReason = parseJson(row.payload, {}).reason || null;
   }
 
   return {

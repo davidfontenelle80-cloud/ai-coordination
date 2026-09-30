@@ -614,3 +614,181 @@ describe('ChatGPT 009 review fixes', () => {
     assert.equal(resume.latest_handoff.key_context, 'ctx');
   });
 });
+
+describe('ChatGPT 009 re-review: boundary validation is complete', () => {
+  // Every case: malformed input must return 400 VALIDATION_FAILED and must
+  // not write an event. The core's VALIDATION_FAILED is therefore reserved
+  // for state-dependent rejections, which map to INVALID_TRANSITION.
+  const eventCount = () => db.queryOne('SELECT COUNT(*) c FROM events').c;
+
+  async function inProgressTask() {
+    const t = await makeTask(`task_bnd_${keyTick}`);
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    await run(chatgpt, { command: 'startTask', task_id: t });
+    return t;
+  }
+
+  it('postMessage kind="banana" is rejected without writing', async () => {
+    const t = await makeTask();
+    const before = eventCount();
+    const r = await run(chatgpt, { command: 'postMessage', task_id: t, kind: 'banana', body: 'hello' });
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.equal(eventCount(), before);
+  });
+
+  it('postMessage rejects a malformed reply_to', async () => {
+    const t = await makeTask();
+    const before = eventCount();
+    const r = await run(chatgpt, { command: 'postMessage', task_id: t, body: 'hi', reply_to: 42 });
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.equal(eventCount(), before);
+  });
+
+  it('postMessage still accepts every valid kind', async () => {
+    const t = await makeTask();
+    for (const kind of ['message', 'question', 'proposal']) {
+      const r = await run(chatgpt, { command: 'postMessage', task_id: t, kind, body: 'b' });
+      assert.equal(r.ok, true, kind);
+    }
+    // Omitted kind defaults to message.
+    const d = await run(chatgpt, { command: 'postMessage', task_id: t, body: 'b' });
+    assert.equal(d.ok, true);
+  });
+
+  it('requestDecision options="yes" is rejected without writing', async () => {
+    const before = eventCount();
+    const r = await run(chatgpt, { command: 'requestDecision', question: 'Ship?', options: 'yes' });
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.equal(eventCount(), before);
+  });
+
+  it('submitResult evidence must be an object, not an array', async () => {
+    const t = await inProgressTask();
+    const before = eventCount();
+    const r = await run(chatgpt, { command: 'submitResult', task_id: t, summary: 'done', evidence: ['not', 'an', 'object'] });
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.equal(eventCount(), before);
+    // A well-formed evidence object passes.
+    const ok = await run(chatgpt, { command: 'submitResult', task_id: t, summary: 'done', evidence: { files: 3 } });
+    assert.equal(ok.ok, true);
+  });
+
+  it('recordReview rejects non-string notes', async () => {
+    const t = await inProgressTask();
+    await run(chatgpt, { command: 'submitResult', task_id: t, summary: 'done' });
+    const before = eventCount();
+    const r = await run(mateo, { command: 'recordReview', task_id: t, outcome: 'accepted', notes: 42 });
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.equal(eventCount(), before);
+  });
+
+  it('postHandoff validates done/pending/references arrays and string fields', async () => {
+    for (const bad of [{ done: 'done' }, { pending: 'p' }, { references: 'r' },
+                       { key_context: 7 }, { reason: ['x'] }]) {
+      const before = eventCount();
+      const r = await run(chatgpt, { command: 'postHandoff', goal: 'g', ...bad });
+      assert.equal(r.code, 'VALIDATION_FAILED', JSON.stringify(bad));
+      assert.equal(eventCount(), before);
+    }
+    // Well-formed handoff passes.
+    const ok = await run(chatgpt, {
+      command: 'postHandoff', goal: 'g', done: ['a'], pending: ['b'],
+      key_context: 'ctx', reason: 'shift', references: ['https://x'],
+    });
+    assert.equal(ok.ok, true);
+  });
+
+  it('setAgentStatus validates the health and work-state enums', async () => {
+    for (const bad of [{ context_health: 'great' }, { work_state: 'sleeping' },
+                       { context_health: 'excellent' }, { work_state: '' }]) {
+      const before = eventCount();
+      const r = await run(chatgpt, {
+        command: 'setAgentStatus', ...bad,
+        context_health: bad.context_health ?? 'normal',
+        work_state: bad.work_state ?? 'working',
+        current_task_id: null,
+      });
+      assert.equal(r.code, 'VALIDATION_FAILED', JSON.stringify(bad));
+      assert.equal(eventCount(), before);
+    }
+    // Every valid enum combination passes.
+    for (const h of ['normal', 'watch', 'handoff-due']) {
+      for (const w of ['idle', 'working', 'blocked', 'stalled']) {
+        const r = await run(chatgpt, {
+          command: 'setAgentStatus', context_health: h, work_state: w, current_task_id: null,
+        });
+        assert.equal(r.ok, true, `${h}/${w}`);
+      }
+    }
+  });
+
+  it('setAgentStatus validates current_task_id shape', async () => {
+    const before = eventCount();
+    const r = await run(chatgpt, {
+      command: 'setAgentStatus', context_health: 'normal', work_state: 'working',
+      current_task_id: 42,
+    });
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.equal(eventCount(), before);
+  });
+
+  it('attachArtifact validates mime_type and sha256', async () => {
+    for (const bad of [{ mime_type: {} }, { sha256: ['abc'] }, { mime_type: 5 }]) {
+      const before = eventCount();
+      const r = await run(chatgpt, {
+        command: 'attachArtifact', name: 'n', uri: 'https://x/n', ...bad,
+      });
+      assert.equal(r.code, 'VALIDATION_FAILED', JSON.stringify(bad));
+      assert.equal(eventCount(), before);
+    }
+    const ok = await run(chatgpt, {
+      command: 'attachArtifact', name: 'n', uri: 'https://x/n',
+      mime_type: 'text/plain', sha256: 'abc123',
+    });
+    assert.equal(ok.ok, true);
+  });
+
+  it('createTask rejects malformed priority and task_id instead of silently defaulting', async () => {
+    const before = eventCount();
+    const p = await run(mateo, { command: 'createTask', title: 'T', goal: 'G', priority: { bad: true } });
+    assert.equal(p.code, 'VALIDATION_FAILED');
+    const t = await run(mateo, { command: 'createTask', title: 'T', goal: 'G', task_id: 42 });
+    assert.equal(t.code, 'VALIDATION_FAILED');
+    assert.equal(eventCount(), before);
+    // A valid string priority still passes.
+    const ok = await run(mateo, { command: 'createTask', title: 'T', goal: 'G', priority: 'high' });
+    assert.equal(ok.ok, true);
+  });
+
+  it('expected_task_version must be a non-negative integer', async () => {
+    const t = await makeTask();
+    const before = eventCount();
+    const r = await run(chatgpt, {
+      command: 'claimTask', task_id: t, expected_task_version: '1',
+    });
+    assert.equal(r.code, 'VALIDATION_FAILED');
+    assert.equal(eventCount(), before);
+  });
+
+  it('blocked reason survives more than 50 later non-status events', async () => {
+    const t = await makeTask();
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    await run(chatgpt, { command: 'startTask', task_id: t });
+    const blk = await run(chatgpt, { command: 'blockTask', task_id: t, reason: 'waiting on David' });
+    assert.equal(blk.ok, true);
+    // Bury the block under 60 priority-change events, far past the old
+    // LIMIT 50 scan bound.
+    let pri = 'normal';
+    for (let i = 0; i < 60; i++) {
+      const next = pri === 'normal' ? 'high' : 'normal';
+      const r = await appendEvent(db, {
+        event_type: 'task.changed', task_id: t, actor_id: 'mateo', submitted_by: 'mateo',
+        idempotency_key: `pri-bury-${i}`, payload: { field: 'priority', from: pri, to: next },
+      }, { now: now() });
+      assert.equal(r.ok, true);
+      pri = next;
+    }
+    const resume = await getResume(db, t);
+    assert.equal(resume.blocked_reason, 'waiting on David');
+  });
+});
