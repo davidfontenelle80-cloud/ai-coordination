@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { openDb, applySchema } from '../src/sqlite-db.mjs';
 import handler from '../src/index.mjs';
 import { randomBase64Url } from '../src/auth.mjs';
+import { isChatGptCallback } from '../src/oauth.mjs';
 
 const SCHEMA = ['0001_schema.sql', '0002_auth.sql', '0003_mcp_oauth.sql']
   .map((f) => readFileSync(new URL(`../../db/migrations/${f}`, import.meta.url), 'utf8')).join('\n');
@@ -227,6 +228,59 @@ describe('task 020 OAuth: client registration', () => {
     }
     const ok = await registerClient(['https://claude.com/api/mcp/auth_callback']);
     assert.equal(ok.status, 201);
+  });
+});
+
+describe('ChatGPT OAuth: per-connection redirect callbacks', () => {
+  const good = [
+    'https://chatgpt.com/connector/oauth/abc123',
+    'https://chatgpt.com/connector/oauth/AbC-123_xYz',
+    `https://chatgpt.com/connector/oauth/${'a'.repeat(200)}`,
+  ];
+  const bad = [
+    'https://chatgpt.com/connector/oauth/', // empty id segment
+    'https://chatgpt.com/connector/oauth/a/b', // two segments
+    'https://chatgpt.com/connector/oauth/a b', // space
+    'https://chatgpt.com/connector/oauth/abc?x=1', // query
+    'https://chatgpt.com/connector/oauth/abc#frag', // fragment
+    'https://chatgpt.com:8443/connector/oauth/abc', // non-default port
+    'https://user@chatgpt.com/connector/oauth/abc', // userinfo
+    'http://chatgpt.com/connector/oauth/abc', // not https
+    'https://chatgpt.com.evil.example/connector/oauth/abc', // lookalike host
+    'https://evilchatgpt.com/connector/oauth/abc', // lookalike host
+    'https://chatgpt.com/other/oauth/abc', // wrong path prefix
+    'https://chatgpt.com/connector/oauth', // missing id
+    `https://chatgpt.com/connector/oauth/${'a'.repeat(201)}`, // id too long
+    'https://chatgpt.com/connector/oauth/%2e%2e', // encoded traversal
+    'not a url',
+    '',
+  ];
+
+  it('predicate accepts ChatGPT callbacks and rejects lookalikes', () => {
+    for (const u of good) assert.equal(isChatGptCallback(u), true, u);
+    for (const u of bad) assert.equal(isChatGptCallback(u), false, u);
+  });
+
+  it('registers a public client for a ChatGPT per-connection callback', async () => {
+    const cb = 'https://chatgpt.com/connector/oauth/test-callback-id-1';
+    const r = await registerClient([cb], 'ChatGPT');
+    assert.equal(r.status, 201);
+    const c = await r.json();
+    assert.match(c.client_id, /^mcpc_/);
+    assert.deepEqual(c.redirect_uris, [cb]);
+  });
+
+  it('registers a client for the legacy fixed ChatGPT callback', async () => {
+    const r = await registerClient(['https://chatgpt.com/connector_platform_oauth_redirect'], 'ChatGPT');
+    assert.equal(r.status, 201);
+  });
+
+  it('still refuses non-ChatGPT, non-Claude callbacks', async () => {
+    for (const u of ['https://evil.example/cb', 'https://chatgpt.com/connector/oauth/a/b']) {
+      const r = await registerClient([u]);
+      assert.equal(r.status, 400);
+      assert.equal((await r.json()).error, 'invalid_redirect_uri');
+    }
   });
 });
 

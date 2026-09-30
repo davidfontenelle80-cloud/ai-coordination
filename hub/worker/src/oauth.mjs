@@ -28,13 +28,34 @@ import {
 } from './auth.mjs';
 
 // Redirect URIs a client may register: Claude's hosted-app callback, plus
-// the claude.com callback Anthropic has announced it may move to. Task 020
-// covers the Claude connector only; any other client (including Claude
-// Code's loopback redirect) is out of scope and refused at registration.
+// the claude.com callback Anthropic has announced it may move to. ChatGPT's
+// desktop/plugin connector mints a per-connection callback of the form
+// https://chatgpt.com/connector/oauth/<opaque-id>, which can never be
+// enumerated in advance, so it is accepted by predicate (exact host, exact
+// path prefix, one bounded opaque segment, https only, no userinfo / port /
+// query / fragment). The legacy fixed ChatGPT callback is also accepted.
+// Any other client (including Claude Code's loopback redirect) remains out
+// of scope and is refused at registration.
 export const ALLOWED_REDIRECT_URIS = [
   'https://claude.ai/api/mcp/auth_callback',
   'https://claude.com/api/mcp/auth_callback',
+  'https://chatgpt.com/connector_platform_oauth_redirect',
 ];
+
+const CHATGPT_DYNAMIC_CB_RE = /^\/connector\/oauth\/[A-Za-z0-9_-]{1,200}$/;
+
+// True for ChatGPT's per-connection OAuth callbacks. Exported for tests.
+export function isChatGptCallback(uri) {
+  let u;
+  try {
+    u = new URL(uri);
+  } catch {
+    return false;
+  }
+  return u.protocol === 'https:' && u.host === 'chatgpt.com'
+    && !u.username && !u.password && !u.search && !u.hash
+    && CHATGPT_DYNAMIC_CB_RE.test(u.pathname);
+}
 
 const CODE_TTL_MS = 10 * 60 * 1000;
 const REQUEST_TTL_MS = 10 * 60 * 1000;
@@ -152,7 +173,7 @@ async function register(request, db, now) {
     return oauthError('invalid_redirect_uri', 'redirect_uris is required');
   }
   for (const uri of redirect_uris) {
-    if (!ALLOWED_REDIRECT_URIS.includes(uri)) {
+    if (!ALLOWED_REDIRECT_URIS.includes(uri) && !isChatGptCallback(uri)) {
       return oauthError('invalid_redirect_uri', `redirect_uri not allowed: ${String(uri).slice(0, 200)}`);
     }
   }
