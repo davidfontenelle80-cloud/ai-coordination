@@ -1,7 +1,7 @@
 ---
 id: 009
 title: HTTP command + query API
-state: in-progress
+state: completed
 owner: mateo
 created: 2026-09-29
 updated: 2026-09-29

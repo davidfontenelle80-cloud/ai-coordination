@@ -66,6 +66,19 @@ function requireReasonString(input, command) {
   }
 }
 
+// Optional task scoping uses explicit presence semantics: undefined/null
+// means workspace scope, a non-empty string means task scope, and anything
+// else (including "" or 0) is malformed input — truthiness must not
+// silently convert a task-scoped command into a workspace one.
+// (ChatGPT 009 final re-review.)
+function optionalTaskId(value, command) {
+  if (value === undefined || value === null) return null;
+  if (!nonEmptyString(value)) {
+    throw cmdErr('VALIDATION_FAILED', `${command} task_id must be a non-empty string or null`);
+  }
+  return value;
+}
+
 function isOrdinaryAgent(principal) {
   return principal.kind === 'agent' && principal.role !== 'mateo';
 }
@@ -265,8 +278,9 @@ async function buildRecordReview(db, input) {
 }
 
 async function buildRequestDecision(db, input, ident, principal) {
-  if (input.task_id) {
-    const task = await getTaskRow(db, input.task_id);
+  const taskId = optionalTaskId(input.task_id, 'requestDecision');
+  if (taskId) {
+    const task = await getTaskRow(db, taskId);
     // An ordinary agent requests David decisions from a task it owns —
     // it must not inject decisions into somebody else's task.
     requireAssigned(principal, task, 'requestDecision');
@@ -279,7 +293,7 @@ async function buildRequestDecision(db, input, ident, principal) {
   }
   return {
     event_type: 'decision.changed',
-    ...(input.task_id ? { task_id: input.task_id } : {}),
+    ...(taskId ? { task_id: taskId } : {}),
     payload: {
       decision_id: genId('dec'),
       phase: 'requested',
@@ -306,8 +320,9 @@ async function buildResolveDecision(db, input) {
 }
 
 async function buildPostHandoff(db, input, ident, principal) {
-  if (input.task_id) {
-    const task = await getTaskRow(db, input.task_id);
+  const taskId = optionalTaskId(input.task_id, 'postHandoff');
+  if (taskId) {
+    const task = await getTaskRow(db, taskId);
     // A handoff is operational state, not discussion: ordinary agents may
     // only file one on a task they own. Cross-task chatter belongs in
     // postMessage. (ChatGPT 009 review.)
@@ -333,7 +348,7 @@ async function buildPostHandoff(db, input, ident, principal) {
   const agent_id = isOrdinaryAgent(principal) ? ident.actor_id : (input.agent_id || ident.actor_id);
   return {
     event_type: 'handoff.posted',
-    ...(input.task_id ? { task_id: input.task_id } : {}),
+    ...(taskId ? { task_id: taskId } : {}),
     payload: {
       agent_id,
       goal: input.goal,
@@ -347,8 +362,9 @@ async function buildPostHandoff(db, input, ident, principal) {
 }
 
 async function buildAttachArtifact(db, input, ident, principal) {
-  if (input.task_id) {
-    const task = await getTaskRow(db, input.task_id);
+  const taskId = optionalTaskId(input.task_id, 'attachArtifact');
+  if (taskId) {
+    const task = await getTaskRow(db, taskId);
     // Artifacts join the durable task record / resume packet: ordinary
     // agents may only attach to a task they own. (ChatGPT 009 review.)
     requireAssigned(principal, task, 'attachArtifact');
@@ -367,7 +383,7 @@ async function buildAttachArtifact(db, input, ident, principal) {
   }
   return {
     event_type: 'artifact.attached',
-    ...(input.task_id ? { task_id: input.task_id } : {}),
+    ...(taskId ? { task_id: taskId } : {}),
     payload: {
       artifact_id: genId('art'),
       name: input.name,

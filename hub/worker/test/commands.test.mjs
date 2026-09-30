@@ -792,3 +792,53 @@ describe('ChatGPT 009 re-review: boundary validation is complete', () => {
     assert.equal(resume.blocked_reason, 'waiting on David');
   });
 });
+
+describe('ChatGPT 009 final re-review: optional task_id presence semantics', () => {
+  // undefined/null → workspace scope; non-empty string → task scope;
+  // anything else ("" , 0, false) → 400 VALIDATION_FAILED, no event.
+  const eventCount = () => db.queryOne('SELECT COUNT(*) c FROM events').c;
+
+  it('empty-string task_id is rejected, not treated as workspace scope', async () => {
+    for (const input of [
+      { command: 'requestDecision', task_id: '', question: 'Q?' },
+      { command: 'postHandoff', task_id: '', goal: 'g' },
+      { command: 'attachArtifact', task_id: '', name: 'n', uri: 'https://x/n' },
+    ]) {
+      const before = eventCount();
+      const r = await executeCommand(db, chatgpt,
+        { idempotency_key: `tid-${before}`, ...input }, { now: now() });
+      assert.equal(r.code, 'VALIDATION_FAILED', JSON.stringify(input));
+      assert.equal(eventCount(), before);
+    }
+    // Falsy non-strings are rejected too.
+    for (const bad of [0, false]) {
+      const before = eventCount();
+      const r = await executeCommand(db, chatgpt,
+        { idempotency_key: `tidb-${before}-${bad}`, command: 'requestDecision', task_id: bad, question: 'Q?' },
+        { now: now() });
+      assert.equal(r.code, 'VALIDATION_FAILED');
+      assert.equal(eventCount(), before);
+    }
+  });
+
+  it('omitted or null task_id still writes intentional workspace-level events', async () => {
+    const d = await run(chatgpt, { command: 'requestDecision', question: 'Q?' });
+    assert.equal(d.ok, true);
+    assert.equal(d.task_id, null);
+    const n = await run(chatgpt, { command: 'postHandoff', task_id: null, goal: 'g' });
+    assert.equal(n.ok, true);
+    assert.equal(n.task_id, null);
+    const a = await run(chatgpt, { command: 'attachArtifact', name: 'n', uri: 'https://x/n' });
+    assert.equal(a.ok, true);
+    assert.equal(a.task_id, null);
+  });
+
+  it('a real task_id still scopes to the task', async () => {
+    const t = await makeTask();
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    const d = await run(chatgpt, { command: 'requestDecision', task_id: t, question: 'Q?' });
+    assert.equal(d.ok, true);
+    assert.equal(d.task_id, t);
+    assert.equal(db.queryOne('SELECT task_id FROM decisions').task_id, t);
+  });
+});
