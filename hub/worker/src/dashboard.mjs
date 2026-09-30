@@ -224,7 +224,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 16px 20px; }
   max-width: 760px; width: 100%; max-height: 86vh; display: flex; flex-direction: column;
 }
 /* Task 018: real screens; the dashboard retains its existing layout. */
-[hidden] { display: none !important; }
+#dashboardScreen[hidden], .screen[hidden] { display: none !important; }
 body.subscreen { padding-bottom: 0; }
 .screen { min-height: 100dvh; }
 .screen-head {

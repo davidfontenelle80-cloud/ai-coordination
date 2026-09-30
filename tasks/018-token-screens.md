@@ -14,7 +14,7 @@ Base: main at `45f9755`. Branch: `codex/task-018-token-screens`.
 - Extended suite: 151/151 tests passing (`npm test` in hub).
 - Six dependency-free tests execute the actual embedded dashboard handlers for instant taps, input-dependent flows, navigation/inventory, issued copy/done/plaintext cleanup, inline revoke and stack behavior, and screen markup/targets/safe areas.
 - Additional HTTP test checks active → revoke → revoked → bearer 401 and checks responses for the issued plaintext, secret portion and stored hash. Existing David-only 401/403 tests remain green.
-- Phone browser verification: pending final check. Local Playwright browser installation is unavailable (download returned an invalid archive); attempting the available cloud browser against a test-only fixture.
+- Phone viewport browser verification: NOT COMPLETED. No local browser is installed; Playwright's download returned an invalid archive. The cloud browser rejected the isolated data-URL fixture under its URL security policy. No workaround was attempted. Automated markup/CSS checks verify safe-area rules and 44px targets, but do not substitute for rendered iPhone-width verification. Mateo should run a 390px browser smoke check before deployment: tap Manage (without Send), Back, issue for an agent, Copy/Done, issue again → View all tokens → Back, then Revoke twice and verify the revoked badge. Check long IDs and names at 320px for overflow.
 - No new endpoint, migration, dependency, framework, paid resource, billing profile, or payment method.
 
 ## Explicit exclusions
