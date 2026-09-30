@@ -312,3 +312,16 @@ task is needed.** Live confirmation is still part of Mateo's verification.
   config instead of guessing.
 - NOT YET PROVEN: functional test — Claude actually invoking a hub tool
   (get_activity) through the connector. Needs David in his Claude app.
+
+## Functional test — PASSED (2026-09-30 ~14:00 EDT)
+
+David pasted a prompt to Claude; Claude reported via the connector:
+- 21 tools visible (8 read + 13 write — matches the deployed set).
+- `get_activity` returned `{"ok":true,"events":[]}` — authenticated call
+  succeeded. Empty feed is correct: the hub genuinely has zero events
+  (independent `/api/stats` check showed events_total=0, tasks_total=0).
+  Not a permissions issue.
+- Claude is seated in the hub. Task 020's core objective is met.
+- Remaining optional proofs: authenticated MCP write with `claude`
+  attribution (write → read → reload), and the dashboard revocation test
+  (revoke Claude's token → refresh fails).
