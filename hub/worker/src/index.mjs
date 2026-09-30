@@ -11,6 +11,8 @@
 //   POST /auth/agents           -> issue agent bearer token (David-only;
 //                                 plaintext token shown ONCE in the response)
 //   POST /auth/agents/revoke    -> revoke an agent bearer token (David-only)
+//   GET  /auth/agents/tokens     -> token metadata inventory (David-only;
+//                                 never includes secret material)
 //   POST /api/commands          -> execute one domain command (auth + rate limit)
 //   GET  /api/tasks            -> list tasks (?status=&assignee=)
 //   GET  /api/tasks/{id}       -> one task
@@ -33,7 +35,7 @@
 
 import { d1Db } from './d1-db.mjs';
 import {
-  authenticate, issueAgentToken, revokeAgentToken,
+  authenticate, issueAgentToken, revokeAgentToken, listAgentTokens,
   beginGitHubLogin, completeGitHubLogin, logout, err,
 } from './auth.mjs';
 import { executeCommand, COMMANDS } from './commands.mjs';
@@ -144,6 +146,18 @@ export default {
         }
         const revoked = await revokeAgentToken(db, body.token_id, { by: 'david' });
         return json({ ok: true, ...revoked }, 200);
+      }
+
+      // Task 017: David-only token inventory. Metadata only — listAgentTokens
+      // never selects secret_hash, and the plaintext secret is not stored,
+      // so nothing sensitive can leave through this route.
+      if (path === '/auth/agents/tokens' && request.method === 'GET') {
+        const principal = await authenticate(db, request);
+        if (!principal) return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
+        if (principal.kind !== 'david') {
+          return json({ ok: false, code: 'FORBIDDEN', message: 'token inventory is David-only' }, 403);
+        }
+        return json({ ok: true, tokens: await listAgentTokens(db) }, 200);
       }
 
       // -- Command API (task 009) ------------------------------------

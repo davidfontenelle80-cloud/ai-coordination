@@ -116,6 +116,21 @@ export async function revokeAgentToken(db, tokenId, { by, now = Date.now() } = {
 }
 
 /**
+ * Task 017: David-only token inventory. Returns metadata only — the query
+ * deliberately never selects secret_hash, and the plaintext secret is not
+ * stored anywhere, so this route cannot leak credential material.
+ */
+export async function listAgentTokens(db) {
+  return db.queryAll(
+    `SELECT t.token_id, t.agent_id, i.display_name, t.created_at, t.created_by,
+            t.last_used_at, t.revoked_at
+     FROM agent_tokens t
+     LEFT JOIN agent_identities i ON i.agent_id = t.agent_id
+     ORDER BY t.created_at DESC`
+  );
+}
+
+/**
  * Authenticate a request. Bearer token first, then David's session cookie.
  * Returns a principal { kind: 'david' } | { kind: 'agent', agent_id, role },
  * or null when no usable credential is present.

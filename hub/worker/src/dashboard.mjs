@@ -98,6 +98,16 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<div id="tokenDialog" class="overlay" hidden>
+  <div class="dialog">
+    <div class="dialog-head">
+      <h3 id="tokenDialogTitle">Agent tokens</h3>
+      <button id="tokenDialogClose" aria-label="Close">✕</button>
+    </div>
+    <div id="tokenDialogBody" class="dialog-body"><p class="empty">Loading…</p></div>
+  </div>
+</div>
+
 <div id="composerWrap">
   <div id="typingRow" class="typing" hidden></div>
   <div id="cmdMenu" class="cmdmenu" hidden></div>
@@ -213,6 +223,34 @@ main { max-width: 1200px; margin: 0 auto; padding: 16px 20px; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
   max-width: 760px; width: 100%; max-height: 86vh; display: flex; flex-direction: column;
 }
+/* Task 017: token manager + issued-token modal. iPhone-first: 44px targets. */
+.tokrow {
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  margin-bottom: 10px; background: var(--panel);
+}
+.tokrow .tokhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.tokrow .tokwho { font-weight: 700; font-size: 15px; }
+.tokrow .tokwho small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
+.tokbadge {
+  font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--mateo); color: var(--mateo); white-space: nowrap;
+}
+.tokbadge.revoked { border-color: var(--bad); color: var(--bad); }
+.tokmeta { font-size: 12px; color: var(--muted); margin: 6px 0 8px; }
+.tokid { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+.tokbtns { display: flex; gap: 8px; }
+.tokbtns button {
+  min-height: 44px; padding: 10px 16px; border-radius: 10px; font-size: 15px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+}
+.tokbtns button.danger { border-color: var(--bad); color: var(--bad); }
+.tokbtns button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+.toksecret {
+  font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; margin: 8px 0;
+}
+.tokwarn { font-size: 13px; color: var(--warn); }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
 .dialog-head h3 { margin: 0; font-size: 16px; }
 .dialog-body { padding: 14px 16px; overflow: auto; font-size: 14px; }
@@ -684,6 +722,127 @@ document.getElementById('taskDetail').addEventListener('click', function (ev) {
   if (ev.target.id === 'taskDetail') document.getElementById('taskDetail').hidden = true;
 });
 
+// ---- Task 017: token manager -------------------------------------------------
+
+document.getElementById('tokenDialogClose').onclick = function () {
+  document.getElementById('tokenDialog').hidden = true;
+};
+document.getElementById('tokenDialog').addEventListener('click', function (ev) {
+  if (ev.target.id === 'tokenDialog') document.getElementById('tokenDialog').hidden = true;
+});
+
+function copyText(t, done) {
+  function fallback() {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    done(ok);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(function () { done(true); }, fallback);
+  } else fallback();
+}
+
+// Issued-token modal: plaintext is shown ONCE, with a Copy button and a
+// close button. It never lands in the composer.
+function showIssuedToken(who, token) {
+  var dlg = document.getElementById('tokenDialog');
+  document.getElementById('tokenDialogTitle').textContent = 'Token issued';
+  var body = document.getElementById('tokenDialogBody');
+  body.innerHTML =
+    '<p>New token for <b>' + esc(who) + '</b>.</p>' +
+    '<div class="toksecret">' + esc(token) + '</div>' +
+    '<p class="tokwarn">copy it now — it will not be shown again.</p>' +
+    '<div class="tokbtns">' +
+    '<button id="copyTokBtn" class="primary">Copy token</button>' +
+    '<button id="viewToksBtn">View all tokens</button>' +
+    '</div>';
+  dlg.hidden = false;
+  document.getElementById('copyTokBtn').onclick = function () {
+    var b = this;
+    copyText(token, function (ok) {
+      b.textContent = ok ? 'Copied ✓' : 'Copy failed — select it manually';
+    });
+  };
+  document.getElementById('viewToksBtn').onclick = function () { openTokenManager(); };
+}
+
+function openTokenManager() {
+  var dlg = document.getElementById('tokenDialog');
+  document.getElementById('tokenDialogTitle').textContent = 'Agent tokens';
+  var body = document.getElementById('tokenDialogBody');
+  dlg.hidden = false;
+  body.innerHTML = '<p class="empty">Loading…</p>';
+  api('/auth/agents/tokens').then(function (r) {
+    if (!r) return; // 401 -> redirected to login
+    if (!r.body || !r.body.ok) {
+      body.innerHTML = '<p class="empty">Failed to load tokens: ' +
+        esc((r.body && r.body.code) || 'error') + '</p>';
+      return;
+    }
+    renderTokenList(r.body.tokens || []);
+  });
+}
+
+function renderTokenList(tokens) {
+  var body = document.getElementById('tokenDialogBody');
+  if (!tokens.length) {
+    body.innerHTML = '<p class="empty">No agent tokens yet. Issue one from the / menu.</p>';
+    return;
+  }
+  body.innerHTML = tokens.map(function (t) {
+    var revoked = !!t.revoked_at;
+    var h = '<div class="tokrow">' +
+      '<div class="tokhead"><div class="tokwho">' + esc(t.display_name || t.agent_id) +
+      '<small>' + esc(t.agent_id) + '</small></div>' +
+      '<span class="tokbadge' + (revoked ? ' revoked' : '') + '">' +
+      (revoked ? 'Revoked' : 'Active') + '</span></div>' +
+      '<div class="tokmeta"><span class="tokid">' + esc(t.token_id) + '</span><br>' +
+      'issued ' + esc(ts(t.created_at)) + ' by ' + esc(t.created_by || '?') +
+      ' · last used ' + (t.last_used_at ? esc(ts(t.last_used_at)) : 'never') + '</div>';
+    if (!revoked) {
+      h += '<div class="tokbtns"><button class="danger" data-revoke="' +
+        esc(t.token_id) + '">Revoke</button></div>';
+    }
+    return h + '</div>';
+  }).join('');
+  var btns = body.querySelectorAll('button[data-revoke]');
+  for (var i = 0; i < btns.length; i++) {
+    (function (b) {
+      var armed = false, timer = null;
+      b.onclick = function () {
+        var tokenId = b.getAttribute('data-revoke');
+        if (!armed) {
+          armed = true;
+          b.textContent = 'Tap again to confirm';
+          timer = setTimeout(function () {
+            armed = false; b.textContent = 'Revoke';
+          }, 6000);
+          return;
+        }
+        clearTimeout(timer);
+        b.disabled = true;
+        b.textContent = 'Revoking…';
+        api('/auth/agents/revoke', {
+          method: 'POST',
+          body: JSON.stringify({ token_id: tokenId }),
+        }).then(function (r) {
+          if (r && r.body && r.body.ok) openTokenManager();
+          else {
+            b.disabled = false;
+            b.textContent = 'Revoke failed — try again';
+            armed = false;
+          }
+        });
+      };
+    })(btns[i]);
+  }
+}
+
 // ---- Agents / activity ---------------------------------------------------------
 
 function renderAgents() {
@@ -878,6 +1037,7 @@ var MENU_COMMANDS = [
   { id: 'setPriority', label: 'Set priority', hint: 'set a task priority', needsTask: true },
   { id: 'requestDecision', label: 'Request decision', hint: 'ask David a question', needsTask: false },
   { id: 'issueToken', label: 'Issue agent token', hint: 'mint a token for an agent', needsAgent: true },
+  { id: 'manageTokens', label: 'Manage agent tokens', hint: 'list tokens and revoke', needsTask: false },
 ];
 
 // Task 016: the three team agents David can mint tokens for. role is always
@@ -1121,6 +1281,12 @@ function sendChat() {
     var f = { question: text };
     if (taskId) f.task_id = taskId;
     p = cmd('requestDecision', f);
+  } else if (action === 'manageTokens') {
+    // Task 017: token inventory — opens the manager dialog, no composer use.
+    chatSel.cmd = 'postMessage';
+    renderChips();
+    openTokenManager();
+    return;
   } else if (action === 'issueToken') {
     // Task 016: David-only token issuance. The plaintext token is returned
     // once — it goes into the composer box so David can copy it.
@@ -1149,11 +1315,11 @@ function sendChat() {
     hideTyping();
     if (r && r.body && r.body.ok) {
       if (action === 'issueToken') {
-        input.value = r.body.token || '';
-        try { sessionStorage.setItem(DRAFT_KEY, ''); } catch (e) {}
-        autoresize(input);
-        setStatus(st, true, 'Token issued for ' + agentLabel(chatSel.agentId) +
-          ' — copy it now; it will not be shown again.');
+        // Task 017: the plaintext token is shown ONCE in a modal with a Copy
+        // button and a close button — it never lands in the composer.
+        var who = agentLabel(chatSel.agentId);
+        showIssuedToken(who, r.body.token || '');
+        setStatus(st, true, 'Token issued for ' + who + ' — copy it now; it will not be shown again.');
         chatSel.cmd = 'postMessage';
         chatSel.agentId = null;
         renderChips();

@@ -678,3 +678,86 @@ describe('task 016 per-agent bearer tokens', () => {
     assert.ok(js.includes('copy it now'), 'copy-once warning');
   });
 });
+
+describe('task 017 token management UI', () => {
+  const davidCookie = async () => {
+    const setCookie = await loginAsDavid();
+    const sessionId = /^hub_session=([^;]+)/.exec(setCookie)[1];
+    return `hub_session=${sessionId}`;
+  };
+
+  const postAuth = (path, headers = {}, body = {}) =>
+    handler.fetch(new Request(`https://hub.example.com${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    }), env);
+
+  async function issueAsDavid(agent_id, role = 'agent') {
+    const cookie = await davidCookie();
+    const r = await postAuth('/auth/agents', { cookie }, { agent_id, role });
+    assert.equal(r.status, 201);
+    return r.json();
+  }
+
+  it('token list is David-only: 401 unauthenticated, 403 for an agent', async () => {
+    const noAuth = await get('/auth/agents/tokens');
+    assert.equal(noAuth.status, 401);
+
+    const { token } = await issueAsDavid('chatgpt');
+    const asAgent = await get('/auth/agents/tokens', { authorization: `Bearer ${token}` });
+    assert.equal(asAgent.status, 403);
+    assert.equal((await asAgent.json()).code, 'FORBIDDEN');
+  });
+
+  it('David sees token metadata — and it never leaks secret material', async () => {
+    const { token_id } = await issueAsDavid('claude');
+    const cookie = await davidCookie();
+    const r = await get('/auth/agents/tokens', { cookie });
+    assert.equal(r.status, 200);
+    const { tokens } = await r.json();
+    const row = tokens.find((t) => t.token_id === token_id);
+    assert.ok(row, 'issued token is listed');
+    assert.equal(row.agent_id, 'claude');
+    const keys = Object.keys(row);
+    assert.ok(!keys.includes('secret_hash'), 'no secret_hash key');
+    assert.ok(!keys.includes('secret'), 'no secret key');
+    assert.ok(!('secret_hash' in row) && !('secret' in row));
+  });
+
+  it('revoke via the manager flow: list shows active, then revoked; Bearer <redacted>', async () => {
+    const cookie = await davidCookie();
+    const { token, token_id } = await issueAsDavid('mateo-watcher');
+
+    const list1 = await (await get('/auth/agents/tokens', { cookie })).json();
+    const before = list1.tokens.find((t) => t.token_id === token_id);
+    assert.ok(before && !before.revoked_at, 'starts active');
+
+    const rev = await postAuth('/auth/agents/revoke', { cookie }, { token_id });
+    assert.equal(rev.status, 200);
+
+    const list2 = await (await get('/auth/agents/tokens', { cookie })).json();
+    const after = list2.tokens.find((t) => t.token_id === token_id);
+    assert.ok(after && after.revoked_at, 'renders as revoked');
+
+    const authed = await get('/auth/me', { authorization: `Bearer ${token}` });
+    assert.equal(authed.status, 401);
+  });
+
+  it('dashboard JS carries the token manager affordance', async () => {
+    const cookie = await davidCookie();
+    const js = await (await get('/dashboard/app.js', { cookie })).text();
+    assert.ok(js.includes('Manage agent tokens'), 'menu entry');
+    assert.ok(js.includes("'/auth/agents/tokens'"), 'list endpoint');
+    assert.ok(js.includes('tokenDialog'), 'manager dialog');
+    assert.ok(js.includes('Revoke'), 'revoke button');
+    assert.ok(js.includes('Copy token'), 'copy button on issued-token modal');
+  });
+
+  it('dashboard HTML has the token dialog overlay', async () => {
+    const cookie = await davidCookie();
+    const html = await (await get('/dashboard', { cookie })).text();
+    assert.ok(html.includes('id="tokenDialog"'), 'token dialog overlay');
+    assert.ok(html.includes('id="tokenDialogClose"'), 'close button');
+  });
+});
