@@ -27,7 +27,7 @@
 //                                 only; tools = the query + command surface.
 //                                 401s carry WWW-Authenticate (task 020)
 //   GET  /.well-known/oauth-protected-resource[/mcp] -> RFC 9728 (task 020)
-//   GET  /.well-known/oauth-authorization-server     -> RFC 8414 (task 020)
+//   GET  /.well-known/oauth-authorization-server[/mcp] -> RFC 8414 (task 020)
 //   POST /oauth/register       -> RFC 7591 client registration (task 020)
 //   GET  /oauth/authorize      -> PKCE authorize; David signs in via GitHub
 //                                 and approves an agent_id (task 020)

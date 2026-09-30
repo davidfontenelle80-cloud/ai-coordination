@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { openDb, applySchema } from '../src/sqlite-db.mjs';
 import handler from '../src/index.mjs';
 import { randomBase64Url } from '../src/auth.mjs';
-import { isChatGptCallback } from '../src/oauth.mjs';
+import { isChatGptCallback, isLoopbackRedirect } from '../src/oauth.mjs';
 
 const SCHEMA = ['0001_schema.sql', '0002_auth.sql', '0003_mcp_oauth.sql']
   .map((f) => readFileSync(new URL(`../../db/migrations/${f}`, import.meta.url), 'utf8')).join('\n');
@@ -220,8 +220,10 @@ describe('task 020 OAuth: client registration', () => {
     assert.equal(c.client_secret, undefined);
   });
 
-  it('refuses redirect URIs outside the Claude callback allowlist', async () => {
-    for (const uris of [['https://evil.example/cb'], ['http://localhost:3118/callback'], [], 'x']) {
+  it('refuses redirect URIs outside the allowlist', async () => {
+    // Note: http://localhost loopback callbacks are intentionally allowed now
+    // (RFC 8252 native desktop clients) — see the loopback describe block.
+    for (const uris of [['https://evil.example/cb'], ['http://example.com:3118/callback'], [], 'x']) {
       const r = await registerClient(uris);
       assert.equal(r.status, 400);
       assert.equal((await r.json()).error, 'invalid_redirect_uri');
@@ -275,12 +277,61 @@ describe('ChatGPT OAuth: per-connection redirect callbacks', () => {
     assert.equal(r.status, 201);
   });
 
-  it('still refuses non-ChatGPT, non-Claude callbacks', async () => {
-    for (const u of ['https://evil.example/cb', 'https://chatgpt.com/connector/oauth/a/b']) {
+  it('still refuses non-ChatGPT, non-Claude, non-loopback callbacks', async () => {
+    for (const u of ['https://evil.example/cb', 'https://chatgpt.com/connector/oauth/a/b', 'http://example.com:54321/callback']) {
       const r = await registerClient([u]);
       assert.equal(r.status, 400);
       assert.equal((await r.json()).error, 'invalid_redirect_uri');
     }
+  });
+});
+
+describe('ChatGPT desktop OAuth: RFC 8252 loopback redirects', () => {
+  const good = [
+    'http://localhost:54321/callback', // the desktop app's ephemeral-port pattern
+    'http://localhost/callback', // no port
+    'http://localhost:1/', // bare root, any port
+    'http://127.0.0.1:9876/callback/abc', // IPv4 loopback
+    'http://[::1]:1234/callback', // IPv6 loopback
+    `http://localhost:54321/${'a'.repeat(190)}`, // bounded long path
+  ];
+  const bad = [
+    'https://localhost:54321/callback', // loopback must be http, not https
+    'http://example.com:54321/callback', // not a loopback host
+    'http://localhost.evil.example/callback', // lookalike host
+    'http://evil-localhost.example/callback', // lookalike host
+    'http://127.0.0.2:1/callback', // not the loopback address
+    'http://localhost:54321/callback?x=1', // query
+    'http://localhost:54321/callback#frag', // fragment
+    'http://user@localhost:54321/callback', // userinfo
+    `http://localhost:54321/${'a'.repeat(201)}`, // path too long
+    'not a url',
+    '',
+  ];
+
+  it('predicate accepts loopback redirects and rejects lookalikes', () => {
+    for (const u of good) assert.equal(isLoopbackRedirect(u), true, u);
+    for (const u of bad) assert.equal(isLoopbackRedirect(u), false, u);
+  });
+
+  it('registers a public client for a desktop loopback callback', async () => {
+    const cb = 'http://localhost:54321/callback';
+    const r = await registerClient([cb], 'ChatGPT desktop');
+    assert.equal(r.status, 201);
+    const c = await r.json();
+    assert.match(c.client_id, /^mcpc_/);
+    assert.deepEqual(c.redirect_uris, [cb]);
+  });
+});
+
+describe('ChatGPT discovery: path-suffixed authorization-server metadata', () => {
+  it('serves RFC 8414 metadata at /.well-known/oauth-authorization-server/mcp', async () => {
+    const r = await req('/.well-known/oauth-authorization-server/mcp');
+    assert.equal(r.status, 200);
+    const m = await r.json();
+    assert.equal(m.issuer, ORIGIN);
+    assert.equal(m.registration_endpoint, `${ORIGIN}/oauth/register`);
+    assert.deepEqual(m.code_challenge_methods_supported, ['S256']);
   });
 });
 
