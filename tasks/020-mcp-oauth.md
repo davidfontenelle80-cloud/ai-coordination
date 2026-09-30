@@ -334,3 +334,21 @@ There is NO `mateo`-role identity: the "Mateo watcher token" is agent-role,
 so Mateo currently cannot createTask/setPriority (both lead-only). Structural
 gap vs the design (Mateo leads): needs a mateo-role token issued by David,
 or David keeps creating tasks. David's decision pending.
+
+## Write-path proof — PASSED (2026-09-30 ~14:10 EDT)
+
+- David created task `task_cbaba96e622b42d5a1c9f8ebb81d7cd0`
+  ("Claude seating test") in the dashboard (created_by=david, v1).
+- Claude (via connector) ran list_tasks → claim_task (fresh idempotency key,
+  version check) → get_task. Claim accepted, replayed=false, version 1→2.
+- Mateo independently verified via API: status=claimed, assignee=claude,
+  created_by=david. Attribution is server-derived and correct — David's
+  writes and Claude's writes record as different identities.
+- The FORBIDDEN on Claude's earlier createTask attempt is by design
+  (auth.mjs: createTask is lead-only — mateo role and David).
+- Test task left in place, claimed by claude; David may delete it in the
+  dashboard or keep it as history.
+- Task 020 proof chain complete: migration → deploy → ceremony → 21 tools →
+  authenticated read → authenticated write with attribution → duplicate
+  removed. Remaining: revocation test (optional), mateo-role token for
+  Mateo (David's decision), `claufe` typo cleanup (optional).
