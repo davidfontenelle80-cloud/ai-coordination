@@ -126,10 +126,13 @@ export async function getResume(db, task_id) {
 export async function getActivity(db, { limit } = {}) {
   const lim = limit == null ? 50 : Math.min(Math.max(limit | 0, 1), 200);
   const rows = await db.queryAll(
-    `SELECT event_id, seq, task_id, event_type, actor_id, submitted_by, created_at
+    `SELECT event_id, seq, task_id, event_type, actor_id, submitted_by, created_at, payload
      FROM events ORDER BY rowid DESC LIMIT ?`,
     [lim]);
-  return { events: rows };
+  // Task 015: the dashboard chat thread renders message.posted bodies from
+  // this feed, so the payload rides along (additive field; no consumer is
+  // required to read it).
+  return { events: rows.map(parsePayload) };
 }
 
 /** GET /decisions?state= */

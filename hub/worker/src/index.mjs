@@ -23,6 +23,9 @@
 //   GET  /dashboard            -> dashboard HTML (David-only)
 //   GET  /dashboard/app.js     -> dashboard JS (David-only)
 //   GET  /dashboard/styles.css -> dashboard CSS (David-only)
+//   GET  /dashboard/manifest.webmanifest -> PWA manifest (David-only; task 015)
+//   GET  /dashboard/icons/*.png -> app icons (David-only; task 015)
+//   GET  /favicon.ico          -> favicon (David-only; task 015)
 //
 // Env: DB (D1), GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET (secrets),
 //      DAVID_GITHUB_ID (numeric), OAUTH_REDIRECT_URI.
@@ -39,6 +42,7 @@ import {
   getActivity, listDecisions, listAgents, getStats,
 } from './queries.mjs';
 import { DASHBOARD_HTML, DASHBOARD_CSS, DASHBOARD_JS } from './dashboard.mjs';
+import { MANIFEST_JSON, iconBytes } from './icons.mjs';
 
 const json = (obj, status = 200, headers = {}) =>
   new Response(JSON.stringify(obj), {
@@ -142,6 +146,20 @@ export default {
       }
       if (request.method === 'GET' && path === '/dashboard/styles.css') {
         return await serveDashboard(request, db, 'text/css; charset=utf-8', DASHBOARD_CSS);
+      }
+
+      // -- App icons + web manifest (task 015) ---------------------------
+      // David-only, like the other dashboard assets.
+      if (request.method === 'GET' && path === '/favicon.ico') {
+        return await serveIcon(request, db, 'favicon');
+      }
+      if (request.method === 'GET' && path === '/dashboard/manifest.webmanifest') {
+        return await serveDashboard(request, db, 'application/manifest+json; charset=utf-8',
+          JSON.stringify(MANIFEST_JSON));
+      }
+      if (request.method === 'GET' && path.startsWith('/dashboard/icons/') && path.endsWith('.png')) {
+        const name = path.slice('/dashboard/icons/'.length, -'.png'.length);
+        return await serveIcon(request, db, name);
       }
 
       // -- Unknown ------------------------------------------------------
@@ -292,5 +310,25 @@ async function serveDashboard(request, db, contentType, body) {
   }
   return new Response(body, {
     headers: { 'content-type': contentType, 'cache-control': 'no-store' },
+  });
+}
+
+// App icon assets (task 015): David-only, like the other dashboard assets.
+// Unknown icon names are 404 even before the auth check — the names are
+// public (they appear in the manifest).
+async function serveIcon(request, db, name) {
+  const icon = iconBytes(name);
+  if (!icon) {
+    return json({ ok: false, code: 'NOT_FOUND', message: `no icon ${name}` }, 404);
+  }
+  const principal = await authenticate(db, request);
+  if (!principal) {
+    return Response.redirect(new URL('/auth/github/login', request.url), 302);
+  }
+  if (principal.kind !== 'david') {
+    return json({ ok: false, code: 'FORBIDDEN', message: 'dashboard is David-only' }, 403);
+  }
+  return new Response(icon.bytes, {
+    headers: { 'content-type': icon.contentType, 'cache-control': 'public, max-age=86400' },
   });
 }

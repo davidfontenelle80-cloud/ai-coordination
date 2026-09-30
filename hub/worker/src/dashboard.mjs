@@ -14,8 +14,16 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AI Coordination Hub — David's control tower</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1420">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="AI Hub">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>AI Hub — David's control tower</title>
+<link rel="icon" type="image/png" href="/dashboard/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/dashboard/icons/apple-touch-icon.png">
+<link rel="manifest" href="/dashboard/manifest.webmanifest">
 <link rel="stylesheet" href="/dashboard/styles.css">
 </head>
 <body>
@@ -70,6 +78,14 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
       <div id="activityList" class="activity"><p class="empty">Loading…</p></div>
     </section>
   </div>
+
+  <section id="chatSection" class="chat-section">
+    <h2>Team chat</h2>
+    <div id="threadScroll" class="thread-scroll">
+      <div id="thread" class="thread" aria-live="polite"><p class="empty">Loading…</p></div>
+    </div>
+    <button id="newMsgPill" class="newmsg" hidden>↓ new messages</button>
+  </section>
 </main>
 
 <div id="taskDetail" class="overlay" hidden>
@@ -82,18 +98,17 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 </div>
 
-<footer id="cmdbar">
-  <select id="cmdAction">
-    <option value="postMessage">Message task</option>
-    <option value="createTask">Create task</option>
-    <option value="setPriority">Set priority</option>
-    <option value="requestDecision">Request decision</option>
-  </select>
-  <select id="cmdTask"><option value="">(select task)</option></select>
-  <input id="cmdInput" type="text" placeholder="Type here, then Send — message, 'title | goal' for a new task, priority, or question" autocomplete="off">
-  <button id="cmdSend">Send</button>
-  <span id="cmdStatus" class="cmdstatus"></span>
-</footer>
+<div id="composerWrap">
+  <div id="typingRow" class="typing" hidden></div>
+  <div id="cmdMenu" class="cmdmenu" hidden></div>
+  <div id="chipRow" class="chip-row" hidden></div>
+  <div id="composer">
+    <button id="slashBtn" class="iconbtn" title="Commands" aria-label="Commands">/</button>
+    <textarea id="cmdInput" rows="1" placeholder="Message the team…" autocomplete="off" enterkeyhint="enter"></textarea>
+    <button id="cmdSend" class="sendbtn" title="Send" aria-label="Send">➤</button>
+  </div>
+  <div id="cmdStatus" class="cmdstatus" role="status"></div>
+</div>
 
 <script src="/dashboard/app.js"></script>
 </body>
@@ -108,10 +123,12 @@ export const DASHBOARD_CSS = `
   --radius: 10px;
 }
 * { box-sizing: border-box; }
+html { height: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  padding-bottom: 76px;
+  min-height: 100dvh;
+  padding-bottom: calc(var(--composer-h, 112px) + 28px);
 }
 header {
   display: flex; justify-content: space-between; align-items: center;
@@ -204,14 +221,126 @@ main { max-width: 1200px; margin: 0 auto; padding: 16px 20px; }
 .msg { border-left: 3px solid var(--line); padding: 4px 10px; margin: 6px 0; }
 .msg .who { font-size: 12px; color: var(--accent); }
 pre.ev { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 12px; overflow: auto; }
-footer#cmdbar {
-  position: fixed; bottom: 0; left: 0; right: 0; z-index: 15;
-  background: var(--panel); border-top: 1px solid var(--line);
-  display: flex; gap: 8px; padding: 10px 16px; align-items: center;
-}
-#cmdInput { flex: 1; }
-.cmdstatus { font-size: 12px; color: var(--muted); min-width: 120px; }
+/* ---- Team chat (task 015) ---- */
+.cmdstatus { font-size: 12px; color: var(--muted); }
 .cmdstatus.ok { color: var(--mateo); } .cmdstatus.err { color: var(--bad); }
+.chat-section { margin-top: 22px; position: relative; }
+.chat-section h2 { font-size: 16px; margin: 0 0 8px; color: var(--mateo); }
+.thread-scroll {
+  max-height: min(56dvh, 540px); overflow-y: auto; overscroll-behavior: contain;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.thread { display: flex; flex-direction: column; }
+.daydiv {
+  text-align: center; color: var(--muted); font-size: 12px; margin: 12px 0 6px;
+}
+.daydiv:first-child { margin-top: 2px; }
+.tgroup { display: flex; flex-direction: column; margin: 8px 0; max-width: 100%; }
+.tgroup.david { align-items: flex-end; }
+.tgroup.agent { align-items: flex-start; }
+.tauthor { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+.avatar {
+  width: 28px; height: 28px; border-radius: 50%; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #0b1220;
+}
+.aname { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.bubble {
+  max-width: 82%; padding: 8px 13px; border-radius: 16px; margin: 2px 0;
+  font-size: 14.5px; line-height: 1.45; overflow-wrap: break-word;
+}
+.tgroup.agent .bubble {
+  background: var(--panel2); border: 1px solid var(--line);
+  border-bottom-left-radius: 5px;
+}
+.tgroup.david .bubble {
+  background: var(--accent); color: #06121f;
+  border-bottom-right-radius: 5px;
+}
+.btask { font-size: 11px; opacity: .75; margin-top: 5px; }
+.bts { font-size: 10.5px; opacity: .65; margin-top: 3px; text-align: right; }
+.newmsg {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px;
+  background: var(--accent); color: #06121f; border: none; border-radius: 18px;
+  padding: 8px 16px; font-size: 13px; font-weight: 600; z-index: 5;
+  box-shadow: 0 4px 14px rgba(0,0,0,.4);
+}
+.newmsg[hidden] { display: none; }
+
+/* ---- Composer (task 015): pinned bottom, keyboard + safe-area aware ---- */
+#composerWrap {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 15;
+  background: var(--panel); border-top: 1px solid var(--line);
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  padding-left: calc(12px + env(safe-area-inset-left));
+  padding-right: calc(12px + env(safe-area-inset-right));
+  will-change: transform;
+}
+.typing {
+  font-size: 12.5px; color: var(--muted); padding: 2px 4px 6px;
+  display: flex; align-items: center; gap: 6px;
+}
+.typing[hidden] { display: none; }
+.typing .dots span {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted); margin-right: 3px; animation: tblink 1.2s infinite;
+}
+.typing .dots span:nth-child(2) { animation-delay: .2s; }
+.typing .dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes tblink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+.cmdmenu {
+  position: absolute; left: 12px; right: 12px; bottom: 100%; margin-bottom: 6px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 12px;
+  overflow: hidden; box-shadow: 0 -6px 24px rgba(0,0,0,.45); z-index: 16;
+  max-height: 300px; overflow-y: auto;
+}
+.cmdmenu[hidden] { display: none; }
+.cmdmenu button {
+  display: block; width: 100%; text-align: left; background: none;
+  border: none; border-bottom: 1px solid var(--line); border-radius: 0;
+  padding: 11px 14px; font-size: 14px;
+}
+.cmdmenu button:last-child { border-bottom: none; }
+.cmdmenu button small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.cmdmenu .menuhead {
+  padding: 8px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); border-bottom: 1px solid var(--line);
+}
+.chip-row { display: flex; gap: 8px; flex-wrap: wrap; padding: 2px 2px 8px; }
+.chip-row[hidden] { display: none; }
+.tchip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--panel2); border: 1px solid var(--accent); color: var(--text);
+  border-radius: 16px; padding: 5px 8px 5px 12px; font-size: 12.5px;
+}
+.tchip button {
+  border: none; background: none; color: var(--muted); padding: 2px 6px;
+  font-size: 13px; line-height: 1;
+}
+#composer { display: flex; gap: 8px; align-items: flex-end; }
+.iconbtn {
+  flex: none; width: 44px; height: 44px; border-radius: 50%;
+  font-size: 20px; font-weight: 700; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+#cmdInput {
+  flex: 1; font-size: 16px; line-height: 1.5; resize: none;
+  min-height: 44px; max-height: 132px; overflow-y: hidden;
+  padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  font-family: inherit;
+}
+#cmdInput:focus { outline: none; border-color: var(--accent); }
+.sendbtn {
+  flex: none; width: 44px; height: 44px; border-radius: 50%;
+  background: var(--accent); border-color: var(--accent); color: #06121f;
+  font-size: 17px; display: inline-flex; align-items: center; justify-content: center;
+}
+#composerWrap .cmdstatus { font-size: 12px; color: var(--muted); min-height: 0; padding: 4px 2px 0; }
+#composerWrap .cmdstatus:empty { display: none; }
+#composerWrap .cmdstatus.ok { color: var(--mateo); }
+#composerWrap .cmdstatus.err { color: var(--bad); }
 `;
 
 export const DASHBOARD_JS = `
@@ -248,7 +377,7 @@ function cmd(command, fields) {
   return api('/api/commands', { method: 'POST', body: JSON.stringify(body) });
 }
 
-var state = { tasks: [], decisions: [], agents: [], activity: [], stats: null, me: null };
+var state = { tasks: [], decisions: [], agents: [], activity: [], stats: null, me: null, pending: [] };
 
 function setStatus(el, ok, msg) {
   el.className = 'cmdstatus ' + (ok ? 'ok' : 'err');
@@ -457,21 +586,19 @@ function renderTasks() {
   list.querySelectorAll('.taskrow').forEach(function (b) {
     b.onclick = function () { openTask(b.getAttribute('data-task')); };
   });
-  // assignee filter options
+  // assignee filter options (rebuild only when the agent set changes, so a
+  // poll never yanks the dropdown out from under David — task 015)
   var sel = document.getElementById('assigneeFilter');
-  var cur = sel.value;
   var agents = {};
   state.tasks.forEach(function (t) { if (t.assignee) agents[t.assignee] = 1; });
-  sel.innerHTML = '<option value="">All agents</option>' + Object.keys(agents).sort().map(function (a) {
-    return '<option value="' + esc(a) + '"' + (a === cur ? ' selected' : '') + '>' + esc(a) + '</option>';
-  }).join('');
-  // command-bar task select
-  var cs = document.getElementById('cmdTask');
-  var ccur = cs.value;
-  cs.innerHTML = '<option value="">(select task)</option>' + state.tasks.map(function (t) {
-    return '<option value="' + esc(t.task_id) + '"' + (t.task_id === ccur ? ' selected' : '') + '>' +
-      esc(t.title) + '</option>';
-  }).join('');
+  var sig = Object.keys(agents).sort().join('|');
+  if (sel.getAttribute('data-sig') !== sig) {
+    var cur = sel.value;
+    sel.innerHTML = '<option value="">All agents</option>' + Object.keys(agents).sort().map(function (a) {
+      return '<option value="' + esc(a) + '"' + (a === cur ? ' selected' : '') + '>' + esc(a) + '</option>';
+    }).join('');
+    sel.setAttribute('data-sig', sig);
+  }
 }
 
 function openTask(id) {
@@ -581,46 +708,413 @@ function renderActivity() {
   }).join('');
 }
 
-// ---- David's command bar ---------------------------------------------------------
+// ---- Team chat thread + composer (task 015) --------------------------------
+//
+// The thread renders message.posted events from the /api/activity feed
+// (chronological, flat) plus optimistic local echoes of David's own sends.
+// David's messages go right in accent bubbles; everyone else goes left with
+// an avatar (initials, per-agent color) and a name header on the first
+// message of each consecutive group.
 
-function sendCommand() {
-  var action = document.getElementById('cmdAction').value;
-  var taskId = document.getElementById('cmdTask').value;
-  var input = document.getElementById('cmdInput').value.trim();
+var AGENT_COLORS = { david: '#5aa9ff', mateo: '#4fd1a5', chatgpt: '#7ee787', claude: '#ff9e64' };
+var AGENT_PALETTE = ['#c77dff', '#ffb020', '#ff6b6b', '#5ad1ff', '#a3e635', '#f472b6'];
+var AGENT_NAMES = { david: 'David', mateo: 'Mateo', chatgpt: 'ChatGPT', claude: 'Claude' };
+
+function agentColor(id) {
+  if (AGENT_COLORS[id]) return AGENT_COLORS[id];
+  var h = 0, s = String(id || '?'), i;
+  for (i = 0; i < s.length; i++) h = ((h * 31) + s.charCodeAt(i)) >>> 0;
+  return AGENT_PALETTE[h % AGENT_PALETTE.length];
+}
+
+function agentInitials(id) {
+  return String(id || '?').replace(/[^a-z0-9]/gi, '').slice(0, 2).toUpperCase() || '?';
+}
+
+function displayName(id) {
+  return AGENT_NAMES[id] || String(id || '?');
+}
+
+function dayLabel(t) {
+  var d = new Date(Number(t));
+  if (isNaN(d.getTime())) return '';
+  var today = new Date(), yest = new Date();
+  yest.setDate(today.getDate() - 1);
+  var sameDay = function (a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  };
+  if (sameDay(d, today)) return 'Today';
+  if (sameDay(d, yest)) return 'Yesterday';
+  return d.toLocaleDateString();
+}
+
+function timeLabel(t) {
+  var d = new Date(Number(t));
+  return isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function threadMessages() {
+  // Expire optimistic echoes that never confirmed (45s).
+  var now = Date.now();
+  state.pending = state.pending.filter(function (p) { return now - p.ts < 45000; });
+  var msgs = state.activity
+    .filter(function (e) { return e.event_type === 'message.posted' && e.payload && e.payload.body; })
+    .map(function (e) {
+      return {
+        author: e.actor_id || e.submitted_by || '?',
+        body: String(e.payload.body),
+        kind: e.payload.kind || 'message',
+        ts: e.created_at,
+        task: e.task_id ? taskTitle(e.task_id) : '',
+        seq: e.seq,
+        pending: false,
+      };
+    });
+  state.pending.forEach(function (p) {
+    var dup = msgs.some(function (m) {
+      return m.author === 'david' && m.body === p.body && Math.abs(Number(m.ts) - p.ts) < 120000;
+    });
+    if (!dup) msgs.push(p);
+  });
+  msgs.sort(function (a, b) { return Number(a.ts) - Number(b.ts); });
+  return msgs;
+}
+
+var lastThreadSig = null;
+var lastSeenMaxSeq = null;
+
+function isNearBottom() {
+  var sc = document.getElementById('threadScroll');
+  return (sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 90;
+}
+
+function renderThread() {
+  var msgs = threadMessages();
+  var sig = msgs.map(function (m) { return (m.pending ? 'p' : m.seq) + ':' + m.ts + ':' + m.body.length; }).join('|');
+  if (sig === lastThreadSig) return; // nothing changed: never touch the DOM
+  lastThreadSig = sig;
+  var sc = document.getElementById('threadScroll');
+  var thread = document.getElementById('thread');
+  var pill = document.getElementById('newMsgPill');
+  var stick = isNearBottom() || lastSeenMaxSeq === null;
+  var maxSeq = 0;
+  msgs.forEach(function (m) { if (!m.pending && Number(m.seq) > maxSeq) maxSeq = Number(m.seq); });
+
+  var groups = [];
+  msgs.forEach(function (m) {
+    var day = dayLabel(m.ts);
+    var g = groups[groups.length - 1];
+    if (!g || g.author !== m.author || g.day !== day) {
+      g = { author: m.author, day: day, items: [] };
+      groups.push(g);
+    }
+    g.items.push(m);
+  });
+
+  var html = '', lastDay = null;
+  groups.forEach(function (g) {
+    if (g.day !== lastDay) {
+      html += '<div class="daydiv">' + esc(g.day) + '</div>';
+      lastDay = g.day;
+    }
+    var isDavid = g.author === 'david';
+    html += '<div class="' + (isDavid ? 'tgroup david' : 'tgroup agent') + '">';
+    if (!isDavid) {
+      html += '<div class="tauthor"><span class="avatar" style="background:' + agentColor(g.author) + '">' +
+        esc(agentInitials(g.author)) + '</span><span class="aname">' + esc(displayName(g.author)) + '</span></div>';
+    }
+    g.items.forEach(function (m) {
+      html += '<div class="bubble">' + esc(m.body) +
+        (m.task ? '<div class="btask">' + esc(m.task) + '</div>' : '') +
+        '<div class="bts">' + esc(timeLabel(m.ts)) + (m.pending ? ' · sending…' : '') + '</div></div>';
+    });
+    html += '</div>';
+  });
+  thread.innerHTML = html || '<p class="empty">No messages yet — say hi to the team.</p>';
+
+  if (stick) {
+    sc.scrollTop = sc.scrollHeight;
+    pill.hidden = true;
+  } else if (lastSeenMaxSeq !== null && maxSeq > lastSeenMaxSeq) {
+    pill.hidden = false;
+  }
+  lastSeenMaxSeq = maxSeq;
+}
+
+// ---- typing indicator --------------------------------------------------------
+// Shown in-flow where the reply will land while a command is in flight.
+// Always cleared on response, on error, or after ~10s — never stuck.
+var typingTimer = null;
+
+function showTyping(label) {
+  var row = document.getElementById('typingRow');
+  row.innerHTML = '<span class="dots"><span></span><span></span><span></span></span> ' + esc(label);
+  row.hidden = false;
+  if (typingTimer) clearTimeout(typingTimer);
+  typingTimer = setTimeout(hideTyping, 10000);
+}
+
+function hideTyping() {
+  if (typingTimer) { clearTimeout(typingTimer); typingTimer = null; }
+  document.getElementById('typingRow').hidden = true;
+}
+
+function typingLabel(taskId) {
+  if (taskId) {
+    var t = state.tasks.filter(function (x) { return x.task_id === taskId; })[0];
+    if (t && t.assignee) return displayName(t.assignee) + ' is writing…';
+  }
+  return 'Sending…';
+}
+
+// ---- slash-command menu + task-target chip -------------------------------------
+// Keeps the task 010 command semantics: message-a-task (default), create
+// task ("title | goal"), set priority, request decision. Commands that need
+// a task get a removable task-target chip above the textarea.
+
+var MENU_COMMANDS = [
+  { id: 'postMessage', label: 'Message task', hint: 'post to a task thread', needsTask: true },
+  { id: 'createTask', label: 'Create task', hint: 'type "title | goal"', needsTask: false },
+  { id: 'setPriority', label: 'Set priority', hint: 'set a task priority', needsTask: true },
+  { id: 'requestDecision', label: 'Request decision', hint: 'ask David a question', needsTask: false },
+];
+
+var chatSel = { cmd: 'postMessage', taskId: null };
+var menuStep = 'cmd';
+
+function menuLabel(id) {
+  var c = MENU_COMMANDS.filter(function (x) { return x.id === id; })[0];
+  return c ? c.label : id;
+}
+
+function toggleMenu() {
+  var menu = document.getElementById('cmdMenu');
+  if (menu.hidden) { menuStep = 'cmd'; renderMenu(); }
+  else hideMenu();
+}
+
+function hideMenu() {
+  document.getElementById('cmdMenu').hidden = true;
+}
+
+function renderMenu() {
+  var menu = document.getElementById('cmdMenu');
+  var html = '';
+  if (menuStep === 'cmd') {
+    html += '<div class="menuhead">Commands</div>';
+    html += MENU_COMMANDS.map(function (c, i) {
+      return '<button data-mi="' + i + '"><b>' + esc(c.label) + '</b><small>' + esc(c.hint) + '</small></button>';
+    }).join('');
+  } else {
+    html += '<div class="menuhead">Pick a task — ' + esc(menuLabel(chatSel.cmd)) + '</div>';
+    if (!state.tasks.length) html += '<div class="menuhead">No tasks yet</div>';
+    html += state.tasks.map(function (t) {
+      return '<button data-mt="' + esc(t.task_id) + '"><b>' + esc(t.title) + '</b><small>' +
+        esc(t.status) + (t.assignee ? ' · ' + esc(t.assignee) : '') + '</small></button>';
+    }).join('');
+  }
+  menu.innerHTML = html;
+  menu.hidden = false;
+  var btns = menu.querySelectorAll('button[data-mi]');
+  for (var i = 0; i < btns.length; i++) {
+    (function (b) {
+      b.onclick = function (ev) {
+        // Stop the document-level dismiss handler from seeing this click:
+        // renderMenu() below detaches the clicked button, which would
+        // otherwise look like an outside click and instantly hide the menu.
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        var c = MENU_COMMANDS[Number(b.getAttribute('data-mi'))];
+        chatSel.cmd = c.id;
+        if (c.needsTask) { menuStep = 'task'; renderMenu(); }
+        else { chatSel.taskId = null; hideMenu(); renderChips(); focusInput(); }
+      };
+    })(btns[i]);
+  }
+  var tbtns = menu.querySelectorAll('button[data-mt]');
+  for (var j = 0; j < tbtns.length; j++) {
+    (function (b) {
+      b.onclick = function (ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        chatSel.taskId = b.getAttribute('data-mt');
+        hideMenu(); renderChips(); focusInput();
+      };
+    })(tbtns[j]);
+  }
+  updateComposerPad();
+}
+
+function renderChips() {
+  var row = document.getElementById('chipRow');
+  var html = '';
+  if (chatSel.cmd !== 'postMessage') {
+    html += '<span class="tchip">/' + esc(menuLabel(chatSel.cmd)) +
+      ' <button data-chip="cmd" aria-label="Clear command">✕</button></span>';
+  }
+  if (chatSel.taskId) {
+    html += '<span class="tchip">▸ ' + esc(taskTitle(chatSel.taskId)) +
+      ' <button data-chip="task" aria-label="Clear task">✕</button></span>';
+  }
+  row.innerHTML = html;
+  row.hidden = !html;
+  var btns = row.querySelectorAll('button[data-chip]');
+  for (var i = 0; i < btns.length; i++) {
+    (function (b) {
+      b.onclick = function () {
+        if (b.getAttribute('data-chip') === 'cmd') chatSel.cmd = 'postMessage';
+        else chatSel.taskId = null;
+        renderChips();
+      };
+    })(btns[i]);
+  }
+  updateComposerPad();
+}
+
+function focusInput() {
+  document.getElementById('cmdInput').focus();
+}
+
+// ---- composer ------------------------------------------------------------------
+
+var DRAFT_KEY = 'hub.chatDraft';
+
+function autoresize(input) {
+  input.style.height = 'auto';
+  var h = Math.min(input.scrollHeight, 132);
+  input.style.height = h + 'px';
+  input.style.overflowY = input.scrollHeight > 132 ? 'auto' : 'hidden';
+}
+
+function initComposer() {
+  var input = document.getElementById('cmdInput');
+  var saved = null;
+  try { saved = sessionStorage.getItem(DRAFT_KEY); } catch (e) { /* private mode */ }
+  if (saved) input.value = saved;
+  autoresize(input);
+
+  input.addEventListener('input', function () {
+    try { sessionStorage.setItem(DRAFT_KEY, input.value); } catch (e) {}
+    autoresize(input);
+  });
+  input.addEventListener('keydown', function (ev) {
+    var menuOpen = !document.getElementById('cmdMenu').hidden;
+    if (ev.key === 'Escape') { hideMenu(); return; }
+    if (ev.key !== 'Enter') return;
+    // With the command picker open, Enter inserts a newline — never sends.
+    if (menuOpen) return;
+    // Desktop: Enter sends, Shift+Enter is a newline. On touch devices
+    // (iPhone) Enter is a newline; the Send button sends.
+    var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    if (!coarse && !ev.shiftKey) { ev.preventDefault(); sendChat(); }
+  });
+
+  document.getElementById('cmdSend').onclick = sendChat;
+  document.getElementById('slashBtn').onclick = toggleMenu;
+  document.getElementById('newMsgPill').onclick = function () {
+    var sc = document.getElementById('threadScroll');
+    sc.scrollTop = sc.scrollHeight;
+    document.getElementById('newMsgPill').hidden = true;
+  };
+  document.getElementById('threadScroll').addEventListener('scroll', function () {
+    if (isNearBottom()) document.getElementById('newMsgPill').hidden = true;
+  });
+  // Tapping outside the menu dismisses it.
+  document.addEventListener('click', function (ev) {
+    var menu = document.getElementById('cmdMenu');
+    if (!menu.hidden && !menu.contains(ev.target) && ev.target.id !== 'slashBtn') hideMenu();
+  });
+
+  initViewportKeyboard();
+  updateComposerPad();
+  window.addEventListener('resize', updateComposerPad);
+}
+
+// iOS does not shrink the layout viewport when the keyboard opens — it just
+// covers the bottom, so position:fixed;bottom:0 alone leaves the composer
+// buried. Offset the composer by the visualViewport keyboard height instead.
+function initViewportKeyboard() {
+  var vv = window.visualViewport;
+  var wrap = document.getElementById('composerWrap');
+  if (!vv) return;
+  var raf = 0;
+  var apply = function () {
+    raf = 0;
+    var kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    wrap.style.transform = kb > 1 ? 'translateY(' + (-Math.round(kb)) + 'px)' : '';
+  };
+  var schedule = function () { if (!raf) raf = requestAnimationFrame(apply); };
+  vv.addEventListener('resize', schedule);
+  vv.addEventListener('scroll', schedule);
+}
+
+// Keep page content clear of the fixed composer.
+function updateComposerPad() {
+  var wrap = document.getElementById('composerWrap');
+  var h = wrap ? wrap.offsetHeight : 112;
+  document.documentElement.style.setProperty('--composer-h', h + 'px');
+}
+
+function removePending(p) {
+  state.pending = state.pending.filter(function (x) { return x !== p; });
+}
+
+function sendChat() {
+  var input = document.getElementById('cmdInput');
+  var text = input.value.trim();
   var st = document.getElementById('cmdStatus');
+  var action = chatSel.cmd;
+  var taskId = chatSel.taskId;
   var p;
   if (action === 'postMessage') {
-    if (!taskId) return setStatus(st, false, 'pick a task');
-    if (!input) return setStatus(st, false, 'type a message');
-    p = cmd('postMessage', { task_id: taskId, body: input });
+    if (!taskId) return setStatus(st, false, 'pick a task — tap / first');
+    if (!text) return setStatus(st, false, 'type a message');
+    p = cmd('postMessage', { task_id: taskId, body: text });
   } else if (action === 'createTask') {
-    if (!input) return setStatus(st, false, 'type a task title');
+    if (!text) return setStatus(st, false, 'type a task title');
     // "title | goal": goal defaults to the title when omitted.
-    var parts = input.split('|');
+    var parts = text.split('|');
     var f2 = { title: parts[0].trim(), goal: parts.length > 1 ? parts.slice(1).join('|').trim() : parts[0].trim() };
     if (!f2.title || !f2.goal) return setStatus(st, false, 'title and goal are required');
     p = cmd('createTask', f2);
   } else if (action === 'setPriority') {
-    if (!taskId) return setStatus(st, false, 'pick a task');
-    if (!input) return setStatus(st, false, 'type a priority');
-    p = cmd('setPriority', { task_id: taskId, priority: input });
+    if (!taskId) return setStatus(st, false, 'pick a task — tap / first');
+    if (!text) return setStatus(st, false, 'type a priority');
+    p = cmd('setPriority', { task_id: taskId, priority: text });
   } else if (action === 'requestDecision') {
-    if (!input) return setStatus(st, false, 'type a question');
-    var f = { question: input };
+    if (!text) return setStatus(st, false, 'type a question');
+    var f = { question: text };
     if (taskId) f.task_id = taskId;
     p = cmd('requestDecision', f);
+  } else {
+    return setStatus(st, false, 'unknown command');
   }
+  // Optimistic echo + in-flow typing indicator.
+  var echo = {
+    author: 'david', body: text, kind: 'message', ts: Date.now(),
+    task: taskId ? taskTitle(taskId) : '', seq: 'p' + Date.now(), pending: true,
+  };
+  state.pending.push(echo);
+  renderThread();
+  showTyping(typingLabel(taskId));
   p.then(function (r) {
+    hideTyping();
     if (r && r.body && r.body.ok) {
       setStatus(st, true, 'sent #' + r.body.seq);
-      document.getElementById('cmdInput').value = '';
+      input.value = '';
+      try { sessionStorage.setItem(DRAFT_KEY, ''); } catch (e) {}
+      autoresize(input);
       loadAll();
-    } else setStatus(st, false, (r && r.body && (r.body.code + ': ' + r.body.message)) || 'failed');
+    } else {
+      removePending(echo);
+      renderThread();
+      setStatus(st, false, (r && r.body && (r.body.code + ': ' + r.body.message)) || 'failed');
+    }
+  }).catch(function () {
+    hideTyping();
+    removePending(echo);
+    renderThread();
+    setStatus(st, false, 'network error');
   });
 }
-
-document.getElementById('cmdSend').onclick = sendCommand;
-document.getElementById('cmdInput').onkeydown = function (ev) { if (ev.key === 'Enter') sendCommand(); };
 
 // ---- init --------------------------------------------------------------------------
 
@@ -632,6 +1126,10 @@ function render() {
   renderTasks();
   renderAgents();
   renderActivity();
+  renderThread();
+  // NOTE (task 015): render() never touches the composer DOM — the 15s
+  // poll re-renders sections and the thread only, so it cannot steal
+  // David's focus or wipe his draft.
 }
 
 document.getElementById('refreshBtn').onclick = loadAll;
@@ -641,6 +1139,7 @@ document.getElementById('logoutBtn').onclick = function () {
   api('/auth/logout', { method: 'POST' }).then(function () { window.location = '/auth/github/login'; });
 };
 
+initComposer();
 loadAll();
 setInterval(function () { if (!document.hidden) loadAll(); }, 15000);
 `;

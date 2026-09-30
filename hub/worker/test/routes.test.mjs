@@ -430,3 +430,166 @@ describe('dashboard routes (task 010)', () => {
     assert.equal(denied.status, 403);
   });
 });
+
+describe('task 015 chat UI + home-screen icons', () => {
+  const davidCookie = async () => {
+    const setCookie = await loginAsDavid();
+    const sessionId = /^hub_session=([^;]+)/.exec(setCookie)[1];
+    return `hub_session=${sessionId}`;
+  };
+
+  async function tokenFor(agent_id, role) {
+    const { issueAgentToken } = await import('../src/auth.mjs');
+    const { token } = await issueAgentToken(
+      { queryOne: (s, p) => db.queryOne(s, p), queryAll: (s, p) => db.queryAll(s, p),
+        batch: (stmts) => db.batch(stmts) },
+      { agent_id, display_name: agent_id, role }, { by: 'david' });
+    return token;
+  }
+
+  const pngMagic = async (r) => {
+    const buf = Buffer.from(await r.arrayBuffer());
+    assert.equal(buf[0], 0x89);
+    assert.equal(buf[1], 0x50); // P
+    assert.equal(buf[2], 0x4e); // N
+    assert.equal(buf[3], 0x47); // G
+    return buf.length;
+  };
+
+  it('unauthenticated icon/manifest/favicon requests redirect to login (never 404)', async () => {
+    for (const p of ['/dashboard/manifest.webmanifest', '/dashboard/icons/icon-192.png',
+                     '/dashboard/icons/apple-touch-icon.png', '/favicon.ico']) {
+      const r = await get(p);
+      assert.equal(r.status, 302, p);
+      assert.ok(r.headers.get('location').includes('/auth/github/login'), p);
+    }
+  });
+
+  it('unknown icon names are 404', async () => {
+    const cookie = await davidCookie();
+    const r = await get('/dashboard/icons/nope.png', { cookie });
+    assert.equal(r.status, 404);
+    assert.equal((await r.json()).code, 'NOT_FOUND');
+  });
+
+  it('agents are refused icons and manifest with 403', async () => {
+    const tok = await tokenFor('chatgpt', 'agent');
+    const authz = { authorization: `Bearer ${tok}` };
+    assert.equal((await get('/dashboard/manifest.webmanifest', authz)).status, 403);
+    assert.equal((await get('/dashboard/icons/icon-192.png', authz)).status, 403);
+    assert.equal((await get('/favicon.ico', authz)).status, 403);
+  });
+
+  it('David gets the manifest with correct content type and icon entries', async () => {
+    const cookie = await davidCookie();
+    const r = await get('/dashboard/manifest.webmanifest', { cookie });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type'), /application\/manifest\+json/);
+    const m = await r.json();
+    assert.equal(m.short_name, 'AI Hub');
+    assert.equal(m.name, 'AI Coordination Hub');
+    assert.equal(m.start_url, '/dashboard');
+    assert.equal(m.display, 'standalone');
+    assert.equal(m.icons.length, 3);
+    const sizes = m.icons.map((i) => i.sizes).sort();
+    assert.deepEqual(sizes, ['192x192', '512x512', '512x512']);
+    assert.ok(m.icons.some((i) => i.purpose === 'maskable'));
+    assert.ok(m.icons.every((i) => i.src.startsWith('/dashboard/icons/') && i.type === 'image/png'));
+  });
+
+  it('David gets each PNG icon with the right content type and real PNG bytes', async () => {
+    const cookie = await davidCookie();
+    for (const p of ['/dashboard/icons/apple-touch-icon.png', '/dashboard/icons/icon-192.png',
+                     '/dashboard/icons/icon-512.png', '/dashboard/icons/icon-maskable-512.png']) {
+      const r = await get(p, { cookie });
+      assert.equal(r.status, 200, p);
+      assert.match(r.headers.get('content-type'), /image\/png/, p);
+      const n = await pngMagic(r);
+      assert.ok(n > 5000, `${p} too small: ${n}`);
+    }
+    const fav = await get('/favicon.ico', { cookie });
+    assert.equal(fav.status, 200);
+    assert.match(fav.headers.get('content-type'), /image\/png/);
+    assert.ok((await pngMagic(fav)) > 1000);
+  });
+
+  it('dashboard head carries the iPhone install tags', async () => {
+    const cookie = await davidCookie();
+    const html = await (await get('/', { cookie })).text();
+    assert.ok(html.includes('viewport-fit=cover'), 'viewport-fit=cover');
+    assert.ok(html.includes('rel="apple-touch-icon"'), 'apple-touch-icon');
+    assert.ok(html.includes('/dashboard/icons/apple-touch-icon.png'), 'touch icon href');
+    assert.ok(html.includes('rel="manifest"'), 'manifest link');
+    assert.ok(html.includes('/dashboard/manifest.webmanifest'), 'manifest href');
+    assert.ok(html.includes('apple-mobile-web-app-capable'), 'web-app-capable');
+    assert.ok(html.includes('apple-mobile-web-app-title'), 'web-app-title');
+    assert.ok(html.includes('content="AI Hub"'), 'AI Hub title');
+    assert.ok(html.includes('apple-mobile-web-app-status-bar-style'), 'status-bar-style');
+    assert.ok(html.includes('name="theme-color"'), 'theme-color');
+  });
+
+  it('dashboard body has the chat thread + composer, not the old command bar', async () => {
+    const cookie = await davidCookie();
+    const html = await (await get('/', { cookie })).text();
+    assert.ok(html.includes('id="thread"'), 'thread');
+    assert.ok(html.includes('id="threadScroll"'), 'threadScroll');
+    assert.ok(html.includes('id="composer"'), 'composer');
+    assert.ok(html.includes('id="composerWrap"'), 'composerWrap');
+    assert.ok(html.includes('id="cmdInput"'), 'cmdInput');
+    assert.ok(html.includes('id="slashBtn"'), 'slashBtn');
+    assert.ok(html.includes('id="cmdSend"'), 'cmdSend');
+    assert.ok(html.includes('id="typingRow"'), 'typingRow');
+    assert.ok(html.includes('id="cmdMenu"'), 'cmdMenu');
+    assert.ok(html.includes('id="chipRow"'), 'chipRow');
+    assert.ok(html.includes('id="newMsgPill"'), 'newMsgPill');
+    assert.ok(!html.includes('id="cmdAction"'), 'old action select gone');
+    assert.ok(!html.includes('id="cmdTask"'), 'old task select gone');
+    assert.ok(!html.includes('id="cmdbar"'), 'old footer gone');
+    // The control-tower sections are intact.
+    for (const id of ['needsDavid', 'needsMateo', 'taskList', 'agentList', 'activityList']) {
+      assert.ok(html.includes('id="' + id + '"'), id + ' intact');
+    }
+  });
+
+  it('dashboard JS carries the iPhone mechanics', async () => {
+    const cookie = await davidCookie();
+    const js = await (await get('/dashboard/app.js', { cookie })).text();
+    assert.ok(js.includes('visualViewport'), 'visualViewport keyboard offset');
+    assert.ok(js.includes('safe-area-inset-bottom') || js.includes('env(safe-area-inset-bottom)') ||
+      (await (await get('/dashboard/styles.css', { cookie })).text()).includes('env(safe-area-inset-bottom)'),
+      'safe-area padding');
+    assert.ok(js.includes('sessionStorage'), 'draft persistence');
+    assert.ok(js.includes('renderThread'), 'thread renderer');
+    assert.ok(js.includes('showTyping') && js.includes('hideTyping'), 'typing indicator');
+    assert.ok(js.includes('newMsgPill') || js.includes('new messages'), 'new-messages pill');
+    assert.ok(js.includes('pointer: coarse'), 'touch Enter behavior');
+  });
+
+  it('dashboard CSS keeps the composer input at 16px (no iOS zoom)', async () => {
+    const cookie = await davidCookie();
+    const css = await (await get('/dashboard/styles.css', { cookie })).text();
+    assert.ok(css.includes('#cmdInput'), 'composer input styled');
+    assert.ok(/font-size:\s*16px/.test(css), '16px input font');
+    assert.ok(css.includes('100dvh'), 'dynamic viewport height');
+    assert.ok(css.includes('44px'), '44pt tap targets');
+  });
+
+  it('/api/activity now carries payloads so the thread can render bodies', async () => {
+    const cookie = await davidCookie();
+    const post = (body) => handler.fetch(new Request('https://hub.example.com/api/commands', {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), env);
+    const c = await post({ command: 'createTask', title: 'Chat', goal: 'G', idempotency_key: 'chat-k1' });
+    const task_id = (await c.json()).task_id;
+    const m = await post({ command: 'postMessage', task_id, body: 'hello team', idempotency_key: 'chat-k2' });
+    assert.equal(m.status, 200);
+
+    const act = await get('/api/activity?limit=10', { cookie });
+    assert.equal(act.status, 200);
+    const posted = (await act.json()).events.filter((e) => e.event_type === 'message.posted');
+    assert.ok(posted.length >= 1);
+    assert.equal(posted[posted.length - 1].payload.body, 'hello team');
+    assert.equal(posted[posted.length - 1].actor_id, 'david');
+  });
+});
