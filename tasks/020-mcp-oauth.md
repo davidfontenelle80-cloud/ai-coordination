@@ -253,3 +253,37 @@ task is needed.** Live confirmation is still part of Mateo's verification.
   token). Recorded in AGENTS.md.
 - Worker NOT deployed yet — keeping code and schema in sync. Deploy +
   live verify proceed after David runs 0003 in the D1 console.
+
+## Deploy + live verification (Mateo, 2026-09-30 ~13:30 EDT)
+
+- Migration: the `custom.cloudflare` API token has no D1 scope (Workers-only),
+  so the API route was impossible. Applied via the Cloudflare dashboard D1
+  console in the live browser (David's saved login; no 2FA encountered). The
+  console's SQL editor is single-line and strips newlines, so a minified
+  single-line variant of 0003 was used (comments stripped, `;`-separated —
+  semantically identical). Verified with
+  `SELECT name FROM sqlite_master ... LIKE 'oauth_%'`: all four tables
+  present (oauth_clients, oauth_authorize_requests, oauth_codes,
+  oauth_refresh_tokens) alongside pre-existing oauth_states. Nothing else
+  touched. Lesson recorded in AGENTS.md: API fails -> browser dashboard
+  before asking David.
+- Deploy: worker uploaded 2026-09-30T17:29:41Z, etag
+  79c1638243a48dca5063d6e8e51efb278e74595586533d3ff1942e93a26dda5a
+  (migration applied BEFORE deploy, per the required ordering).
+- Live checks (all green):
+  - `/.well-known/oauth-authorization-server` -> RFC 8414 metadata.
+  - `/.well-known/oauth-protected-resource/mcp` -> RFC 9728 metadata.
+  - `POST /mcp` unauthenticated -> 401 with
+    `WWW-Authenticate: Bearer <redacted>".../oauth-protected-resource/mcp"`.
+  - `POST /oauth/register` with disallowed redirect_uri -> invalid_redirect_uri.
+  - `POST /oauth/register` with https://claude.ai/api/mcp/auth_callback ->
+    201, `mcpc_...` public client (test row; inert).
+  - `GET /oauth/authorize` (no David session) -> 302 to GitHub OAuth with
+    the hub's client_id and state.
+  - `POST /oauth/token` with bad input -> standard OAuth error JSON.
+  - Regression: authenticated `POST /mcp` initialize (existing agent token)
+    -> ai-hub/0.1.0; `GET /api/stats` -> ok. 019 behavior intact.
+- NOT YET PROVEN LIVE: the full human ceremony — GitHub sign-in as David ->
+  consent page -> typed agent_id -> code -> token -> 21 tools ->
+  get_activity -> dashboard revoke -> refresh fails. That needs David in
+  the Claude connector dialog; steps handed to him on 2026-09-30.
