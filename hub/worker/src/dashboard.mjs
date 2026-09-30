@@ -27,6 +27,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 <link rel="stylesheet" href="/dashboard/styles.css">
 </head>
 <body>
+<div id="dashboardScreen">
 <header>
   <div class="brand">
     <h1>AI Coordination Hub</h1>
@@ -98,16 +99,6 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 </div>
 
-<div id="tokenDialog" class="overlay" hidden>
-  <div class="dialog">
-    <div class="dialog-head">
-      <h3 id="tokenDialogTitle">Agent tokens</h3>
-      <button id="tokenDialogClose" aria-label="Close">✕</button>
-    </div>
-    <div id="tokenDialogBody" class="dialog-body"><p class="empty">Loading…</p></div>
-  </div>
-</div>
-
 <div id="composerWrap">
   <div id="typingRow" class="typing" hidden></div>
   <div id="cmdMenu" class="cmdmenu" hidden></div>
@@ -120,6 +111,15 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   <div id="cmdStatus" class="cmdstatus" role="status"></div>
 </div>
 
+</div>
+<section id="tokensScreen" class="screen" hidden aria-labelledby="tokensTitle">
+  <header class="screen-head"><button id="tokensBack">← Back</button><h1 id="tokensTitle" tabindex="-1">Agent tokens</h1></header>
+  <main id="tokensBody" class="screen-body"><p class="empty">Loading…</p></main>
+</section>
+<section id="issuedTokenScreen" class="screen" hidden aria-labelledby="issuedTokenTitle">
+  <header class="screen-head"><button id="issuedTokenBack">← Back</button><h1 id="issuedTokenTitle" tabindex="-1">Token issued</h1></header>
+  <main id="issuedTokenBody" class="screen-body"></main>
+</section>
 <script src="/dashboard/app.js"></script>
 </body>
 </html>
@@ -223,7 +223,23 @@ main { max-width: 1200px; margin: 0 auto; padding: 16px 20px; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
   max-width: 760px; width: 100%; max-height: 86vh; display: flex; flex-direction: column;
 }
-/* Task 017: token manager + issued-token modal. iPhone-first: 44px targets. */
+/* Task 018: real screens; the dashboard retains its existing layout. */
+[hidden] { display: none !important; }
+body.subscreen { padding-bottom: 0; }
+.screen { min-height: 100dvh; }
+.screen-head {
+  padding: calc(12px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 12px calc(16px + env(safe-area-inset-left));
+  justify-content: flex-start;
+}
+.screen-head h1 { margin: 0; font-size: 20px; }
+.screen button { min-width: 44px; min-height: 44px; }
+.screen-body {
+  max-width: 760px; padding: 16px calc(16px + env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+}
+.screen .tokbtns { flex-wrap: wrap; }
+.screen .tokwho, .screen .tokmeta { overflow-wrap: anywhere; min-width: 0; }
+.screen textarea.toksecret { display: block; width: 100%; resize: vertical; font-size: 16px; }
+
 .tokrow {
   border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
   margin-bottom: 10px; background: var(--panel);
@@ -722,14 +738,47 @@ document.getElementById('taskDetail').addEventListener('click', function (ev) {
   if (ev.target.id === 'taskDetail') document.getElementById('taskDetail').hidden = true;
 });
 
-// ---- Task 017: token manager -------------------------------------------------
-
-document.getElementById('tokenDialogClose').onclick = function () {
-  document.getElementById('tokenDialog').hidden = true;
+// ---- Task 018: extensible in-memory screen router -----------------------------
+var screens = {
+  dashboard: { element: 'dashboardScreen' },
+  tokens: { element: 'tokensScreen', title: 'tokensTitle', enter: loadTokens },
+  issuedToken: { element: 'issuedTokenScreen', title: 'issuedTokenTitle', leave: clearIssuedToken },
 };
-document.getElementById('tokenDialog').addEventListener('click', function (ev) {
-  if (ev.target.id === 'tokenDialog') document.getElementById('tokenDialog').hidden = true;
-});
+var currentScreen = 'dashboard';
+var screenStack = [];
+var screenScroll = {};
+var tokenLoadVersion = 0;
+
+function clearIssuedToken() {
+  // Remove both plaintext and handlers closing over it. Never put this screen
+  // on the back stack: leaving it ends the one-time viewing session.
+  document.getElementById('issuedTokenBody').replaceChildren();
+}
+
+function navigateScreen(name, back) {
+  if (!screens[name]) return;
+  if (name === currentScreen) return;
+  screenScroll[currentScreen] = window.scrollY;
+  if (screens[currentScreen].leave) screens[currentScreen].leave();
+  if (!back && currentScreen !== 'issuedToken') screenStack.push(currentScreen);
+  currentScreen = name;
+  Object.keys(screens).forEach(function (key) {
+    document.getElementById(screens[key].element).hidden = key !== name;
+  });
+  document.body.classList.toggle('subscreen', name !== 'dashboard');
+  hideMenu();
+  document.getElementById('taskDetail').hidden = true;
+  document.getElementById('cmdInput').blur();
+  window.scrollTo(0, screenScroll[name] || 0);
+  if (screens[name].title) document.getElementById(screens[name].title).focus({ preventScroll: true });
+  if (screens[name].enter) screens[name].enter();
+  if (name === 'dashboard') updateComposerPad();
+}
+
+function backScreen() { navigateScreen(screenStack.pop() || 'dashboard', true); }
+function doneTokenScreen() { screenStack = []; navigateScreen('dashboard', true); }
+document.getElementById('tokensBack').onclick = backScreen;
+document.getElementById('issuedTokenBack').onclick = backScreen;
 
 function copyText(t, done) {
   function fallback() {
@@ -747,21 +796,21 @@ function copyText(t, done) {
   } else fallback();
 }
 
-// Issued-token modal: plaintext is shown ONCE, with a Copy button and a
-// close button. It never lands in the composer.
+// Plaintext belongs only to the one-time issued-token screen.
 function showIssuedToken(who, token) {
-  var dlg = document.getElementById('tokenDialog');
-  document.getElementById('tokenDialogTitle').textContent = 'Token issued';
-  var body = document.getElementById('tokenDialogBody');
+  navigateScreen('issuedToken');
+  var body = document.getElementById('issuedTokenBody');
   body.innerHTML =
     '<p>New token for <b>' + esc(who) + '</b>.</p>' +
-    '<div class="toksecret">' + esc(token) + '</div>' +
+    '<textarea id="issuedTokenValue" class="toksecret" readonly rows="4" aria-label="One-time agent token"></textarea>' +
     '<p class="tokwarn">copy it now — it will not be shown again.</p>' +
     '<div class="tokbtns">' +
     '<button id="copyTokBtn" class="primary">Copy token</button>' +
     '<button id="viewToksBtn">View all tokens</button>' +
+    '<button id="doneTokBtn">Done</button>' +
     '</div>';
-  dlg.hidden = false;
+  document.getElementById('issuedTokenValue').value = token;
+  document.getElementById('doneTokBtn').onclick = doneTokenScreen;
   document.getElementById('copyTokBtn').onclick = function () {
     var b = this;
     copyText(token, function (ok) {
@@ -771,25 +820,25 @@ function showIssuedToken(who, token) {
   document.getElementById('viewToksBtn').onclick = function () { openTokenManager(); };
 }
 
-function openTokenManager() {
-  var dlg = document.getElementById('tokenDialog');
-  document.getElementById('tokenDialogTitle').textContent = 'Agent tokens';
-  var body = document.getElementById('tokenDialogBody');
-  dlg.hidden = false;
+function openTokenManager() { navigateScreen('tokens'); }
+
+function loadTokens() {
+  var version = ++tokenLoadVersion;
+  var body = document.getElementById('tokensBody');
   body.innerHTML = '<p class="empty">Loading…</p>';
-  api('/auth/agents/tokens').then(function (r) {
-    if (!r) return; // 401 -> redirected to login
-    if (!r.body || !r.body.ok) {
-      body.innerHTML = '<p class="empty">Failed to load tokens: ' +
-        esc((r.body && r.body.code) || 'error') + '</p>';
-      return;
-    }
+  return api('/auth/agents/tokens').then(function (r) {
+    if (version !== tokenLoadVersion || currentScreen !== 'tokens' || !r) return;
+    if (!r.body || !r.body.ok) throw new Error('load failed');
     renderTokenList(r.body.tokens || []);
+  }).catch(function () {
+    if (version !== tokenLoadVersion || currentScreen !== 'tokens') return;
+    body.innerHTML = '<p class="empty">Failed to load tokens.</p><button id="retryTokens">Try again</button>';
+    document.getElementById('retryTokens').onclick = loadTokens;
   });
 }
 
 function renderTokenList(tokens) {
-  var body = document.getElementById('tokenDialogBody');
+  var body = document.getElementById('tokensBody');
   if (!tokens.length) {
     body.innerHTML = '<p class="empty">No agent tokens yet. Issue one from the / menu.</p>';
     return;
@@ -831,12 +880,14 @@ function renderTokenList(tokens) {
           method: 'POST',
           body: JSON.stringify({ token_id: tokenId }),
         }).then(function (r) {
-          if (r && r.body && r.body.ok) openTokenManager();
+          if (r && r.body && r.body.ok) { if (currentScreen === 'tokens') loadTokens(); }
           else {
             b.disabled = false;
             b.textContent = 'Revoke failed — try again';
             armed = false;
           }
+        }).catch(function () {
+          b.disabled = false; b.textContent = 'Revoke failed — try again'; armed = false;
         });
       };
     })(btns[i]);
@@ -1032,10 +1083,10 @@ function typingLabel(taskId) {
 // a task get a removable task-target chip above the textarea.
 
 var MENU_COMMANDS = [
-  { id: 'postMessage', label: 'Message task', hint: 'post to a task thread', needsTask: true },
-  { id: 'createTask', label: 'Create task', hint: 'type "title | goal"', needsTask: false },
-  { id: 'setPriority', label: 'Set priority', hint: 'set a task priority', needsTask: true },
-  { id: 'requestDecision', label: 'Request decision', hint: 'ask David a question', needsTask: false },
+  { id: 'postMessage', label: 'Message task', hint: 'post to a task thread', needsText: true, needsTask: true },
+  { id: 'createTask', label: 'Create task', hint: 'type "title | goal"', needsText: true },
+  { id: 'setPriority', label: 'Set priority', hint: 'set a task priority', needsText: true, needsTask: true },
+  { id: 'requestDecision', label: 'Request decision', hint: 'ask David a question', needsText: true },
   { id: 'issueToken', label: 'Issue agent token', hint: 'mint a token for an agent', needsAgent: true },
   { id: 'manageTokens', label: 'Manage agent tokens', hint: 'list tokens and revoke', needsTask: false },
 ];
@@ -1104,6 +1155,9 @@ function renderMenu() {
         // otherwise look like an outside click and instantly hide the menu.
         if (ev && ev.stopPropagation) ev.stopPropagation();
         var c = MENU_COMMANDS[Number(b.getAttribute('data-mi'))];
+        if (!c.needsText && !c.needsTask && !c.needsAgent) {
+          hideMenu(); executeInstantCommand(c.id); return;
+        }
         chatSel.cmd = c.id;
         chatSel.agentId = null;
         if (c.needsTask) { menuStep = 'task'; renderMenu(); }
@@ -1133,6 +1187,10 @@ function renderMenu() {
     })(tbtns[j]);
   }
   updateComposerPad();
+}
+
+function executeInstantCommand(id) {
+  if (id === 'manageTokens') openTokenManager();
 }
 
 function renderChips() {
@@ -1260,6 +1318,7 @@ function sendChat() {
   var st = document.getElementById('cmdStatus');
   var action = chatSel.cmd;
   var taskId = chatSel.taskId;
+  var agentId = chatSel.agentId;
   var p;
   if (action === 'postMessage') {
     if (!taskId) return setStatus(st, false, 'pick a task — tap / first');
@@ -1282,19 +1341,19 @@ function sendChat() {
     if (taskId) f.task_id = taskId;
     p = cmd('requestDecision', f);
   } else if (action === 'manageTokens') {
-    // Task 017: token inventory — opens the manager dialog, no composer use.
+    // Token inventory navigation also supports the legacy send path.
     chatSel.cmd = 'postMessage';
     renderChips();
     openTokenManager();
     return;
   } else if (action === 'issueToken') {
     // Task 016: David-only token issuance. The plaintext token is returned
-    // once — it goes into the composer box so David can copy it.
+    // once — it goes only to the dedicated issued-token screen.
     if (!chatSel.agentId) return setStatus(st, false, 'pick an agent — tap / first');
     showTyping('Issuing token…');
     p = api('/auth/agents', {
       method: 'POST',
-      body: JSON.stringify({ agent_id: chatSel.agentId, role: 'agent' }),
+      body: JSON.stringify({ agent_id: agentId, role: 'agent' }),
     });
   } else {
     return setStatus(st, false, 'unknown command');
@@ -1315,9 +1374,8 @@ function sendChat() {
     hideTyping();
     if (r && r.body && r.body.ok) {
       if (action === 'issueToken') {
-        // Task 017: the plaintext token is shown ONCE in a modal with a Copy
-        // button and a close button — it never lands in the composer.
-        var who = agentLabel(chatSel.agentId);
+        // Plaintext is shown ONCE on its own screen, never in the composer.
+        var who = agentLabel(agentId);
         showIssuedToken(who, r.body.token || '');
         setStatus(st, true, 'Token issued for ' + who + ' — copy it now; it will not be shown again.');
         chatSel.cmd = 'postMessage';

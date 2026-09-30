@@ -744,20 +744,47 @@ describe('task 017 token management UI', () => {
     assert.equal(authed.status, 401);
   });
 
+  it('token screens use existing routes with no secret material beyond one-time issuance', async () => {
+    const cookie = await davidCookie();
+    const issued = await issueAsDavid('chatgpt');
+    const stored = db.queryOne('SELECT secret_hash FROM agent_tokens WHERE token_id = ?', [issued.token_id]);
+    assert.ok(stored.secret_hash);
+    assert.ok(!JSON.stringify(issued).includes(stored.secret_hash));
+    const secret = issued.token.split('.')[1];
+    const check = (body) => {
+      const json = JSON.stringify(body);
+      assert.ok(!json.includes('secret_hash'));
+      assert.ok(!json.includes(stored.secret_hash));
+      assert.ok(!json.includes(secret));
+      assert.ok(!json.includes(issued.token));
+    };
+    const active = await (await get('/auth/agents/tokens', { cookie })).json();
+    check(active);
+    assert.ok(active.tokens.find(t => t.token_id === issued.token_id && !t.revoked_at));
+    assert.equal((await get('/auth/me', { authorization: `Bearer ${issued.token}` })).status, 200);
+    const revoke = await postAuth('/auth/agents/revoke', { cookie }, { token_id: issued.token_id });
+    assert.equal(revoke.status, 200); check(await revoke.json());
+    const revoked = await (await get('/auth/agents/tokens', { cookie })).json();
+    check(revoked);
+    assert.ok(revoked.tokens.find(t => t.token_id === issued.token_id && t.revoked_at));
+    const rejected = await get('/auth/me', { authorization: `Bearer ${issued.token}` });
+    assert.equal(rejected.status, 401); check(await rejected.json());
+  });
+
   it('dashboard JS carries the token manager affordance', async () => {
     const cookie = await davidCookie();
     const js = await (await get('/dashboard/app.js', { cookie })).text();
     assert.ok(js.includes('Manage agent tokens'), 'menu entry');
     assert.ok(js.includes("'/auth/agents/tokens'"), 'list endpoint');
-    assert.ok(js.includes('tokenDialog'), 'manager dialog');
+    assert.ok(js.includes('tokensBody'), 'manager screen');
     assert.ok(js.includes('Revoke'), 'revoke button');
     assert.ok(js.includes('Copy token'), 'copy button on issued-token modal');
   });
 
-  it('dashboard HTML has the token dialog overlay', async () => {
+  it('dashboard HTML has the token screen and back navigation', async () => {
     const cookie = await davidCookie();
     const html = await (await get('/dashboard', { cookie })).text();
-    assert.ok(html.includes('id="tokenDialog"'), 'token dialog overlay');
-    assert.ok(html.includes('id="tokenDialogClose"'), 'close button');
+    assert.ok(html.includes('id="tokensScreen"'), 'token screen');
+    assert.ok(html.includes('id="tokensBack"'), 'back button');
   });
 });
