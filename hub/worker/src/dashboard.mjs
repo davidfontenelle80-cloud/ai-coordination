@@ -114,7 +114,10 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 </div>
 <section id="tokensScreen" class="screen" hidden aria-labelledby="tokensTitle">
   <header class="screen-head"><button id="tokensBack">← Back</button><h1 id="tokensTitle" tabindex="-1">Agent tokens</h1></header>
-  <main id="tokensBody" class="screen-body"><p class="empty">Loading…</p></main>
+  <main class="screen-body">
+    <div class="tokfilters"><button id="toggleRevokedTokens" aria-pressed="false" disabled>Show revoked</button></div>
+    <div id="tokensBody"><p class="empty">Loading…</p></div>
+  </main>
 </section>
 <section id="issuedTokenScreen" class="screen" hidden aria-labelledby="issuedTokenTitle">
   <header class="screen-head"><button id="issuedTokenBack">← Back</button><h1 id="issuedTokenTitle" tabindex="-1">Token issued</h1></header>
@@ -237,6 +240,7 @@ body.subscreen { padding-bottom: 0; }
   max-width: 760px; padding: 16px calc(16px + env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
 }
 .screen .tokbtns { flex-wrap: wrap; }
+.tokfilters { margin-bottom: 12px; }
 .screen .tokwho, .screen .tokmeta { overflow-wrap: anywhere; min-width: 0; }
 .screen textarea.toksecret { display: block; width: 100%; resize: vertical; font-size: 16px; }
 
@@ -820,10 +824,19 @@ function showIssuedToken(who, token) {
   document.getElementById('viewToksBtn').onclick = function () { openTokenManager(); };
 }
 
+var tokenInventory = [];
+var showRevokedTokens = false;
+document.getElementById('toggleRevokedTokens').onclick = function () {
+  showRevokedTokens = !showRevokedTokens;
+  renderTokenList(tokenInventory);
+};
+
 function openTokenManager() { navigateScreen('tokens'); }
 
 function loadTokens() {
   var version = ++tokenLoadVersion;
+  tokenInventory = [];
+  document.getElementById('toggleRevokedTokens').disabled = true;
   var body = document.getElementById('tokensBody');
   body.innerHTML = '<p class="empty">Loading…</p>';
   return api('/auth/agents/tokens').then(function (r) {
@@ -838,12 +851,23 @@ function loadTokens() {
 }
 
 function renderTokenList(tokens) {
+  tokenInventory = tokens;
+  var revokedCount = tokens.filter(function (t) { return !!t.revoked_at; }).length;
+  var toggle = document.getElementById('toggleRevokedTokens');
+  toggle.disabled = false;
+  toggle.textContent = (showRevokedTokens ? 'Hide revoked' : 'Show revoked') + ' (' + revokedCount + ')';
+  toggle.setAttribute('aria-pressed', String(showRevokedTokens));
+  var visibleTokens = tokens.filter(function (t) { return showRevokedTokens || !t.revoked_at; });
   var body = document.getElementById('tokensBody');
   if (!tokens.length) {
     body.innerHTML = '<p class="empty">No agent tokens yet. Issue one from the / menu.</p>';
     return;
   }
-  body.innerHTML = tokens.map(function (t) {
+  if (!visibleTokens.length) {
+    body.innerHTML = '<p class="empty">No active tokens. Turn on Show revoked to view token history.</p>';
+    return;
+  }
+  body.innerHTML = visibleTokens.map(function (t) {
     var revoked = !!t.revoked_at;
     var h = '<div class="tokrow">' +
       '<div class="tokhead"><div class="tokwho">' + esc(t.display_name || t.agent_id) +

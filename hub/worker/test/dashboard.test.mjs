@@ -8,7 +8,7 @@ function app() {
   const nodes = new Map();
   function element() {
     return { hidden: true, value: '', style: {}, textContent: '', offsetHeight: 100,
-      innerHTML: '', focus() {}, blur() {}, addEventListener() {},
+      innerHTML: '', setAttribute(key, value) { this[key] = value; }, focus() {}, blur() {}, addEventListener() {},
       replaceChildren() { this.innerHTML = ''; },
       querySelectorAll(selector) {
         const attr = /\[([^\]]+)\]/.exec(selector)?.[1];
@@ -124,6 +124,44 @@ describe('task 018 screen behavior', () => {
     assert.equal(a.requests[1].opts.body, '{"token_id":"tok_123"}');
     assert.equal(a.requests[2].path, '/auth/agents/tokens');
     assert.equal(a.context.screenStack.length, 1);
+  });
+
+  it('token inventory defaults to active, with a reversible history toggle and no extra request', () => {
+    const a = app();
+    a.run("renderTokenList([{ agent_id: 'chatgpt', token_id: 'tok_active' }, { agent_id: 'claude', token_id: 'tok_revoked', revoked_at: 1 }])");
+    const body = a.document.getElementById('tokensBody');
+    const toggle = a.document.getElementById('toggleRevokedTokens');
+    assert.ok(body.innerHTML.includes('tok_active'));
+    assert.ok(!body.innerHTML.includes('tok_revoked'));
+    assert.equal(toggle.textContent, 'Show revoked (1)');
+    assert.equal(toggle['aria-pressed'], 'false');
+    toggle.onclick();
+    assert.ok(body.innerHTML.includes('tok_active'));
+    assert.ok(body.innerHTML.includes('tok_revoked'));
+    assert.equal(body.querySelectorAll('button[data-revoke]').length, 1);
+    assert.equal(toggle.textContent, 'Hide revoked (1)');
+    assert.equal(toggle['aria-pressed'], 'true');
+    toggle.onclick();
+    assert.ok(!body.innerHTML.includes('tok_revoked'));
+    assert.equal(a.context.tokenInventory.length, 2);
+    assert.equal(a.requests.length, 0);
+  });
+
+  it('revoked-only and empty inventories have helpful empty states; reload honors the filter', async () => {
+    const a = app();
+    const body = a.document.getElementById('tokensBody');
+    a.run("renderTokenList([{ token_id: 'tok_history', revoked_at: 1 }])");
+    assert.ok(body.innerHTML.includes('No active tokens'));
+    a.document.getElementById('toggleRevokedTokens').onclick();
+    assert.ok(body.innerHTML.includes('tok_history'));
+    a.context.fetch = async () => ({ status: 200, json: async () => ({ ok: true, tokens: [{ token_id: 'tok_history', revoked_at: 1 }] }) });
+    a.run('openTokenManager()'); await flush();
+    assert.ok(body.innerHTML.includes('tok_history'));
+    a.document.getElementById('toggleRevokedTokens').onclick();
+    a.run('loadTokens()'); await flush();
+    assert.ok(!body.innerHTML.includes('tok_history'));
+    a.run('renderTokenList([])');
+    assert.ok(body.innerHTML.includes('No agent tokens yet'));
   });
 
   it('screen markup and CSS provide safe areas, 44px targets and no token dialog', () => {
