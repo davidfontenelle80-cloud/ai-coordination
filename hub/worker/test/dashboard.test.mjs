@@ -111,6 +111,51 @@ describe('task 018 screen behavior', () => {
     assert.equal(a.document.getElementById('issuedTokenBody').innerHTML, '');
   });
 
+  it('issueToken walks agent then role; Lead posts role mateo and resets after', async () => {
+    const a = app();
+    const menu = a.document.getElementById('cmdMenu');
+    const realQSA = menu.querySelectorAll.bind(menu);
+    const useButtons = selector => {
+      const btns = realQSA(selector);
+      menu.querySelectorAll = s => s === selector ? btns : [];
+      a.run('renderMenu()');
+      return btns;
+    };
+    a.run("menuStep = 'cmd'; renderMenu()");
+    const miBtns = useButtons('button[data-mi]');
+    const idx = a.context.MENU_COMMANDS.findIndex(c => c.id === 'issueToken');
+    miBtns[idx].onclick({ stopPropagation() {} });
+    assert.equal(a.context.chatSel.cmd, 'issueToken');
+    assert.equal(a.context.menuStep, 'agent');
+    const maBtns = useButtons('button[data-ma]');
+    const mateoBtn = maBtns.find(b => b.getAttribute('data-ma') === 'mateo');
+    assert.ok(mateoBtn, 'mateo is a mintable agent');
+    mateoBtn.onclick({ stopPropagation() {} });
+    assert.equal(a.context.chatSel.agentId, 'mateo');
+    assert.equal(a.context.menuStep, 'role');
+    const mrBtns = useButtons('button[data-mr]');
+    assert.equal(mrBtns.length, 2);
+    const leadBtn = mrBtns.find(b => b.getAttribute('data-mr') === 'mateo');
+    leadBtn.onclick({ stopPropagation() {} });
+    assert.equal(a.context.chatSel.role, 'mateo');
+    a.run('sendChat()'); await flush();
+    const issue = a.requests.find(r => r.path === '/auth/agents');
+    assert.ok(issue);
+    assert.deepEqual(JSON.parse(issue.opts.body), { agent_id: 'mateo', role: 'mateo' });
+    assert.equal(a.context.chatSel.role, 'agent');
+    assert.equal(a.context.chatSel.agentId, null);
+    assert.equal(a.context.chatSel.cmd, 'postMessage');
+  });
+
+  it('issueToken defaults to the agent role when no role was picked', async () => {
+    const a = app();
+    a.run("chatSel.cmd = 'issueToken'; chatSel.agentId = 'chatgpt'; sendChat()");
+    await flush();
+    const issue = a.requests.find(r => r.path === '/auth/agents');
+    assert.ok(issue);
+    assert.deepEqual(JSON.parse(issue.opts.body), { agent_id: 'chatgpt', role: 'agent' });
+  });
+
   it('revoke requires two taps, posts only token_id, and reloads inventory without stacking', async () => {
     const a = app(); a.run('openTokenManager()'); await flush();
     const body = a.document.getElementById('tokensBody');

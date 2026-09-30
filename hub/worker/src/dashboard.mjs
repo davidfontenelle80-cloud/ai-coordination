@@ -1091,15 +1091,17 @@ var MENU_COMMANDS = [
   { id: 'manageTokens', label: 'Manage agent tokens', hint: 'list tokens and revoke', needsTask: false },
 ];
 
-// Task 016: the three team agents David can mint tokens for. role is always
-// 'agent' (least privilege) — issuance creates the identity row if needed.
+// Task 021: David can mint tokens for any team agent, including a lead
+// (coordinator) seat. The role is picked after the agent; the server
+// whitelists it to 'agent' | 'mateo'. Issuance creates the identity row.
 var AGENTS_MENU = [
   { id: 'chatgpt', label: 'ChatGPT' },
   { id: 'claude', label: 'Claude' },
+  { id: 'mateo', label: 'Mateo (lead seat)' },
   { id: 'mateo-watcher', label: 'Mateo watcher' },
 ];
 
-var chatSel = { cmd: 'postMessage', taskId: null, agentId: null };
+var chatSel = { cmd: 'postMessage', taskId: null, agentId: null, role: 'agent' };
 var menuStep = 'cmd';
 
 function menuLabel(id) {
@@ -1134,8 +1136,13 @@ function renderMenu() {
     // Task 016: pick which team agent gets the new token.
     html += '<div class="menuhead">Pick an agent — ' + esc(menuLabel(chatSel.cmd)) + '</div>';
     html += AGENTS_MENU.map(function (a) {
-      return '<button data-ma="' + esc(a.id) + '"><b>' + esc(a.label) + '</b><small>role: agent</small></button>';
+      return '<button data-ma="' + esc(a.id) + '"><b>' + esc(a.label) + '</b><small>role next</small></button>';
     }).join('');
+  } else if (menuStep === 'role') {
+    // Task 021: role pick follows the agent pick for issueToken.
+    html += '<div class="menuhead">Pick a role — Issue agent token</div>';
+    html += '<button data-mr="agent"><b>Agent</b><small>standard team seat</small></button>';
+    html += '<button data-mr="mateo"><b>Lead</b><small>coordinator — create tasks, set priorities</small></button>';
   } else {
     html += '<div class="menuhead">Pick a task — ' + esc(menuLabel(chatSel.cmd)) + '</div>';
     if (!state.tasks.length) html += '<div class="menuhead">No tasks yet</div>';
@@ -1160,6 +1167,7 @@ function renderMenu() {
         }
         chatSel.cmd = c.id;
         chatSel.agentId = null;
+        chatSel.role = 'agent';
         if (c.needsTask) { menuStep = 'task'; renderMenu(); }
         else if (c.needsAgent) { menuStep = 'agent'; renderMenu(); }
         else { chatSel.taskId = null; hideMenu(); renderChips(); focusInput(); }
@@ -1172,9 +1180,21 @@ function renderMenu() {
       b.onclick = function (ev) {
         if (ev && ev.stopPropagation) ev.stopPropagation();
         chatSel.agentId = b.getAttribute('data-ma');
+        // Task 021: token issuance picks a role after the agent.
+        if (chatSel.cmd === 'issueToken') { menuStep = 'role'; renderMenu(); return; }
         hideMenu(); renderChips(); focusInput();
       };
     })(abtns[k]);
+  }
+  var rbtns = menu.querySelectorAll('button[data-mr]');
+  for (var m = 0; m < rbtns.length; m++) {
+    (function (b) {
+      b.onclick = function (ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        chatSel.role = b.getAttribute('data-mr');
+        hideMenu(); renderChips(); focusInput();
+      };
+    })(rbtns[m]);
   }
   var tbtns = menu.querySelectorAll('button[data-mt]');
   for (var j = 0; j < tbtns.length; j++) {
@@ -1208,14 +1228,20 @@ function renderChips() {
     html += '<span class="tchip">▸ ' + esc(agentLabel(chatSel.agentId)) +
       ' <button data-chip="agent" aria-label="Clear agent">✕</button></span>';
   }
+  if (chatSel.cmd === 'issueToken' && chatSel.agentId) {
+    // Task 021: surface the picked role; it defaults to Agent.
+    html += '<span class="tchip">▸ ' + (chatSel.role === 'mateo' ? 'Lead' : 'Agent') +
+      ' <button data-chip="role" aria-label="Clear role">✕</button></span>';
+  }
   row.innerHTML = html;
   row.hidden = !html;
   var btns = row.querySelectorAll('button[data-chip]');
   for (var i = 0; i < btns.length; i++) {
     (function (b) {
       b.onclick = function () {
-        if (b.getAttribute('data-chip') === 'cmd') { chatSel.cmd = 'postMessage'; chatSel.agentId = null; }
-        else if (b.getAttribute('data-chip') === 'agent') chatSel.agentId = null;
+        if (b.getAttribute('data-chip') === 'cmd') { chatSel.cmd = 'postMessage'; chatSel.agentId = null; chatSel.role = 'agent'; }
+        else if (b.getAttribute('data-chip') === 'agent') { chatSel.agentId = null; chatSel.role = 'agent'; }
+        else if (b.getAttribute('data-chip') === 'role') chatSel.role = 'agent';
         else chatSel.taskId = null;
         renderChips();
       };
@@ -1347,13 +1373,15 @@ function sendChat() {
     openTokenManager();
     return;
   } else if (action === 'issueToken') {
-    // Task 016: David-only token issuance. The plaintext token is returned
-    // once — it goes only to the dedicated issued-token screen.
+    // Task 021: David-only token issuance with a picked role (agent or
+    // lead). The plaintext token is returned once — it goes only to the
+    // dedicated issued-token screen.
     if (!chatSel.agentId) return setStatus(st, false, 'pick an agent — tap / first');
+    var issueRole = chatSel.role === 'mateo' ? 'mateo' : 'agent';
     showTyping('Issuing token…');
     p = api('/auth/agents', {
       method: 'POST',
-      body: JSON.stringify({ agent_id: agentId, role: 'agent' }),
+      body: JSON.stringify({ agent_id: agentId, role: issueRole }),
     });
   } else {
     return setStatus(st, false, 'unknown command');
@@ -1375,11 +1403,12 @@ function sendChat() {
     if (r && r.body && r.body.ok) {
       if (action === 'issueToken') {
         // Plaintext is shown ONCE on its own screen, never in the composer.
-        var who = agentLabel(agentId);
+        var who = agentLabel(agentId) + (issueRole === 'mateo' ? ' (Lead)' : '');
         showIssuedToken(who, r.body.token || '');
         setStatus(st, true, 'Token issued for ' + who + ' — copy it now; it will not be shown again.');
         chatSel.cmd = 'postMessage';
         chatSel.agentId = null;
+        chatSel.role = 'agent';
         renderChips();
       } else {
         setStatus(st, true, 'sent #' + r.body.seq);
