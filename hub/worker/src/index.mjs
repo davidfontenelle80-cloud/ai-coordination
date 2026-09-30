@@ -18,6 +18,11 @@
 //   GET  /api/activity         -> recent events
 //   GET  /api/decisions        -> decisions (?state=requested|resolved)
 //   GET  /api/agents           -> live agent status projection
+//   GET  /api/stats            -> quota/what-we-control indicators (task 010)
+//   GET  /                    -> dashboard HTML (David-only; task 010)
+//   GET  /dashboard            -> dashboard HTML (David-only)
+//   GET  /dashboard/app.js     -> dashboard JS (David-only)
+//   GET  /dashboard/styles.css -> dashboard CSS (David-only)
 //
 // Env: DB (D1), GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET (secrets),
 //      DAVID_GITHUB_ID (numeric), OAUTH_REDIRECT_URI.
@@ -31,8 +36,9 @@ import { executeCommand, COMMANDS } from './commands.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import {
   listTasks, getTask, getTaskEvents, getResume,
-  getActivity, listDecisions, listAgents,
+  getActivity, listDecisions, listAgents, getStats,
 } from './queries.mjs';
+import { DASHBOARD_HTML, DASHBOARD_CSS, DASHBOARD_JS } from './dashboard.mjs';
 
 const json = (obj, status = 200, headers = {}) =>
   new Response(JSON.stringify(obj), {
@@ -123,6 +129,19 @@ export default {
       // -- Query API (task 009) ----------------------------------------
       if (path.startsWith('/api/') && request.method === 'GET') {
         return await handleQuery(request, db, url);
+      }
+
+      // -- Dashboard UI (task 010) ---------------------------------------
+      // David's control tower: David-only. Unauthenticated browsers go to
+      // the GitHub login; authenticated non-David principals get 403.
+      if (request.method === 'GET' && (path === '/' || path === '/dashboard')) {
+        return await serveDashboard(request, db, 'text/html; charset=utf-8', DASHBOARD_HTML);
+      }
+      if (request.method === 'GET' && path === '/dashboard/app.js') {
+        return await serveDashboard(request, db, 'application/javascript; charset=utf-8', DASHBOARD_JS);
+      }
+      if (request.method === 'GET' && path === '/dashboard/styles.css') {
+        return await serveDashboard(request, db, 'text/css; charset=utf-8', DASHBOARD_CSS);
       }
 
       // -- Unknown ------------------------------------------------------
@@ -246,6 +265,10 @@ async function handleQuery(request, db, url) {
   if (segs.length === 2 && segs[1] === 'agents') {
     return json({ ok: true, ...(await listAgents(db)) });
   }
+  // GET /api/stats (task 010)
+  if (segs.length === 2 && segs[1] === 'stats') {
+    return json({ ok: true, stats: await getStats(db) });
+  }
 
   return json({ ok: false, code: 'NOT_FOUND', message: `no route GET ${url.pathname}` }, 404);
 }
@@ -254,4 +277,20 @@ async function handleQuery(request, db, url) {
 function sanitizePrincipal(p) {
   if (p.kind === 'david') return { kind: 'david' };
   return { kind: 'agent', agent_id: p.agent_id, role: p.role };
+}
+
+// Dashboard assets (task 010): David-only. Unauthenticated requests are
+// redirected to the GitHub login; authenticated non-David principals are
+// refused — this is David's control tower, not a team surface.
+async function serveDashboard(request, db, contentType, body) {
+  const principal = await authenticate(db, request);
+  if (!principal) {
+    return Response.redirect(new URL('/auth/github/login', request.url), 302);
+  }
+  if (principal.kind !== 'david') {
+    return json({ ok: false, code: 'FORBIDDEN', message: 'dashboard is David-only' }, 403);
+  }
+  return new Response(body, {
+    headers: { 'content-type': contentType, 'cache-control': 'no-store' },
+  });
 }

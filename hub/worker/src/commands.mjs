@@ -31,6 +31,7 @@ export const COMMANDS = [
   'postHandoff',
   'attachArtifact',
   'setAgentStatus',
+  'setPriority', // task 010: David's dashboard needs to change priority.
 ];
 
 function cmdErr(code, message, extra) {
@@ -79,6 +80,23 @@ function optionalTaskId(value, command) {
   return value;
 }
 
+// Priority is a coordination decision: Mateo and David only. Ordinary
+// agents cannot reprioritize tasks. (Task 010 — David's input box.)
+async function buildSetPriority(db, input, ident, principal) {
+  const task = await getTaskRow(db, input.task_id);
+  if (isOrdinaryAgent(principal)) {
+    throw cmdErr('FORBIDDEN', 'setPriority is limited to Mateo and David');
+  }
+  if (!nonEmptyString(input.priority)) {
+    throw cmdErr('VALIDATION_FAILED', 'setPriority requires a non-empty priority');
+  }
+  return {
+    event_type: 'task.changed',
+    task_id: task.task_id,
+    payload: { field: 'priority', from: task.priority ?? 'normal', to: input.priority },
+  };
+}
+
 function isOrdinaryAgent(principal) {
   return principal.kind === 'agent' && principal.role !== 'mateo';
 }
@@ -86,7 +104,7 @@ function isOrdinaryAgent(principal) {
 async function getTaskRow(db, task_id) {
   if (!nonEmptyString(task_id)) throw cmdErr('VALIDATION_FAILED', 'task_id is required');
   const row = await db.queryOne(
-    'SELECT task_id, status, assignee, version, latest_result_event_id FROM tasks WHERE task_id = ?', [task_id]);
+    'SELECT task_id, status, assignee, version, priority, latest_result_event_id FROM tasks WHERE task_id = ?', [task_id]);
   if (!row) throw cmdErr('NOT_FOUND', `task ${task_id} does not exist`);
   return row;
 }
@@ -437,6 +455,7 @@ const BUILDERS = {
   postHandoff: buildPostHandoff,
   attachArtifact: buildAttachArtifact,
   setAgentStatus: buildSetAgentStatus,
+  setPriority: buildSetPriority,
 };
 
 // ---------------------------------------------------------------------------

@@ -188,6 +188,7 @@ const MATEO_COMMANDS = new Set([
   'requestDecision',
   'postHandoff', 'attachArtifact',
   'setAgentStatus',
+  'setPriority', // task 010: coordinator-only (not in AGENT_COMMANDS).
   'agent.issue', 'agent.revoke',
 ]);
 

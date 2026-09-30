@@ -149,3 +149,38 @@ export async function listAgents(db) {
      FROM agents ORDER BY agent_id ASC`, []);
   return { agents: rows };
 }
+
+/**
+ * GET /api/stats — task 010 quota-safety indicators.
+ *
+ * Deliberately limited to what we control (our own rows), not precise
+ * Cloudflare account telemetry: event counts, today's event/command
+ * volume, task/decisions/agent tallies. Each command appends exactly one
+ * event, so events_today is the command-volume proxy.
+ */
+export async function getStats(db) {
+  const startOfDayUtc = (() => {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    return d.getTime();
+  })();
+  const events_total = (await db.queryOne('SELECT COUNT(*) c FROM events')).c;
+  const events_today = (await db.queryOne(
+    'SELECT COUNT(*) c FROM events WHERE created_at >= ?', [startOfDayUtc])).c;
+  const statusRows = await db.queryAll(
+    'SELECT status, COUNT(*) c FROM tasks GROUP BY status', []);
+  const tasks_by_status = {};
+  let tasks_total = 0;
+  for (const r of statusRows) {
+    tasks_by_status[r.status] = r.c;
+    tasks_total += r.c;
+  }
+  const decisions_open = (await db.queryOne(
+    "SELECT COUNT(*) c FROM decisions WHERE phase = 'requested'")).c;
+  const agents_count = (await db.queryOne('SELECT COUNT(*) c FROM agents')).c;
+  return {
+    events_total, events_today,
+    tasks_total, tasks_by_status,
+    decisions_open, agents_count,
+  };
+}

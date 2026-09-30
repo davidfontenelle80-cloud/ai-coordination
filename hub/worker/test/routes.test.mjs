@@ -319,3 +319,114 @@ describe('task 009 command/query API', () => {
     assert.equal((await r.json()).code, 'VALIDATION_FAILED');
   });
 });
+
+describe('dashboard routes (task 010)', () => {
+  const davidCookie = async () => {
+    const setCookie = await loginAsDavid();
+    const sessionId = /^hub_session=([^;]+)/.exec(setCookie)[1];
+    return `hub_session=${sessionId}`;
+  };
+
+  async function tokenFor(agent_id, role) {
+    const { issueAgentToken } = await import('../src/auth.mjs');
+    const { token } = await issueAgentToken(
+      { queryOne: (s, p) => db.queryOne(s, p), queryAll: (s, p) => db.queryAll(s, p),
+        batch: (stmts) => db.batch(stmts) },
+      { agent_id, display_name: agent_id, role }, { by: 'david' });
+    return token;
+  }
+
+  it('unauthenticated dashboard page redirects to GitHub login', async () => {
+    const r = await get('/');
+    assert.equal(r.status, 302);
+    assert.ok(new URL(r.headers.get('location'), 'https://hub.example.com').pathname
+      .startsWith('/auth/github/login'));
+    const js = await get('/dashboard/app.js');
+    assert.equal(js.status, 302);
+  });
+
+  it('David gets the dashboard page and its assets', async () => {
+    const cookie = await davidCookie();
+    const page = await get('/', { cookie });
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-type'), /text\/html/);
+    const html = await page.text();
+    assert.ok(html.includes('control tower'));
+    assert.ok(html.includes('/dashboard/app.js'));
+    assert.ok(html.includes('/dashboard/styles.css'));
+
+    const js = await get('/dashboard/app.js', { cookie });
+    assert.equal(js.status, 200);
+    assert.match(js.headers.get('content-type'), /javascript/);
+    assert.ok((await js.text()).length > 1000);
+
+    const css = await get('/dashboard/styles.css', { cookie });
+    assert.equal(css.status, 200);
+    assert.match(css.headers.get('content-type'), /css/);
+
+    const alias = await get('/dashboard', { cookie });
+    assert.equal(alias.status, 200);
+  });
+
+  it('agents are refused the dashboard with 403', async () => {
+    const tok = await tokenFor('chatgpt', 'agent');
+    const r = await get('/', { authorization: `Bearer ${tok}` });
+    assert.equal(r.status, 403);
+    assert.equal((await r.json()).code, 'FORBIDDEN');
+  });
+
+  it('GET /api/stats returns what-we-control indicators', async () => {
+    const cookie = await davidCookie();
+    const unauth = await get('/api/stats');
+    assert.equal(unauth.status, 401);
+
+    const empty = await get('/api/stats', { cookie });
+    assert.equal(empty.status, 200);
+    const s0 = (await empty.json()).stats;
+    assert.deepEqual(Object.keys(s0).sort(),
+      ['agents_count', 'decisions_open', 'events_today', 'events_total', 'tasks_by_status', 'tasks_total'].sort());
+    assert.equal(s0.events_total, 0);
+
+    // Create a task over HTTP; the counters move.
+    const created = await handler.fetch(new Request('https://hub.example.com/api/commands', {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ command: 'createTask', title: 'T', goal: 'G', idempotency_key: 'stats-k1' }),
+    }), env);
+    assert.equal(created.status, 200);
+    const s1 = (await (await get('/api/stats', { cookie })).json()).stats;
+    assert.equal(s1.events_total, 1);
+    assert.equal(s1.events_today, 1);
+    assert.equal(s1.tasks_total, 1);
+    assert.equal(s1.tasks_by_status.pending, 1);
+
+    // An agent token can read stats too (any authenticated principal).
+    const tok = await tokenFor('mateo', 'mateo');
+    const asAgent = await get('/api/stats', { authorization: `Bearer ${tok}` });
+    assert.equal(asAgent.status, 200);
+    assert.equal((await asAgent.json()).stats.events_total, 1);
+  });
+
+  it('setPriority works end-to-end over HTTP as David, refused for agents', async () => {
+    const cookie = await davidCookie();
+    const post = (body, headers = {}) => handler.fetch(new Request('https://hub.example.com/api/commands', {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    }), env);
+
+    const c = await post({ command: 'createTask', title: 'P', goal: 'G', idempotency_key: 'prio-k1' });
+    const task_id = (await c.json()).task_id;
+    const sp = await post({ command: 'setPriority', task_id, priority: 'urgent', idempotency_key: 'prio-k2' });
+    assert.equal(sp.status, 200);
+    assert.equal((await sp.json()).event_type, 'task.changed');
+    const t = await get(`/api/tasks/${task_id}`, { cookie });
+    assert.equal((await t.json()).task.priority, 'urgent');
+
+    const gptTok = await tokenFor('chatgpt', 'agent');
+    const denied = await handler.fetch(new Request('https://hub.example.com/api/commands', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${gptTok}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ command: 'setPriority', task_id, priority: 'low', idempotency_key: 'prio-k3' }),
+    }), env);
+    assert.equal(denied.status, 403);
+  });
+});

@@ -44,11 +44,11 @@ async function makeTask(task_id = 'task_cmd1') {
 }
 
 describe('command surface', () => {
-  it('exposes exactly the 12 specified commands', () => {
+  it('exposes exactly the 13 specified commands', () => {
     assert.deepEqual([...COMMANDS].sort(), [
       'attachArtifact', 'blockTask', 'claimTask', 'createTask', 'postHandoff',
       'postMessage', 'recordReview', 'requestDecision', 'resolveDecision',
-      'setAgentStatus', 'startTask', 'submitResult',
+      'setAgentStatus', 'setPriority', 'startTask', 'submitResult',
     ].sort());
   });
 
@@ -840,5 +840,40 @@ describe('ChatGPT 009 final re-review: optional task_id presence semantics', () 
     assert.equal(d.ok, true);
     assert.equal(d.task_id, t);
     assert.equal(db.queryOne('SELECT task_id FROM decisions').task_id, t);
+  });
+});
+
+describe('setPriority (task 010)', () => {
+  it('David and Mateo can change priority; the projection updates', async () => {
+    const t = await makeTask();
+    const r = await run(david, { command: 'setPriority', task_id: t, priority: 'urgent' });
+    assert.equal(r.ok, true);
+    assert.equal(r.event_type, 'task.changed');
+    assert.equal(db.queryOne('SELECT priority FROM tasks WHERE task_id = ?', [t]).priority, 'urgent');
+    const ev = db.queryOne('SELECT payload FROM events WHERE event_id = ?', [r.event_id]);
+    assert.deepEqual(JSON.parse(ev.payload), { field: 'priority', from: 'normal', to: 'urgent' });
+    // Mateo too.
+    const m = await run(mateo, { command: 'setPriority', task_id: t, priority: 'high' });
+    assert.equal(m.ok, true);
+    assert.equal(db.queryOne('SELECT priority FROM tasks WHERE task_id = ?', [t]).priority, 'high');
+  });
+
+  it('ordinary agents cannot change priority', async () => {
+    const t = await makeTask();
+    await run(chatgpt, { command: 'claimTask', task_id: t });
+    const before = db.queryOne('SELECT COUNT(*) c FROM events').c;
+    const r = await run(chatgpt, { command: 'setPriority', task_id: t, priority: 'urgent' });
+    assert.equal(r.code, 'FORBIDDEN');
+    assert.equal(db.queryOne('SELECT COUNT(*) c FROM events').c, before);
+  });
+
+  it('rejects malformed priority and unknown tasks', async () => {
+    const t = await makeTask();
+    for (const bad of ['', 0, null]) {
+      const r = await run(david, { command: 'setPriority', task_id: t, priority: bad });
+      assert.equal(r.code, 'VALIDATION_FAILED', `priority=${JSON.stringify(bad)}`);
+    }
+    const r = await run(david, { command: 'setPriority', task_id: 'nope', priority: 'high' });
+    assert.equal(r.code, 'NOT_FOUND');
   });
 });

@@ -1,8 +1,8 @@
 ---
 id: 010
 title: Dashboard UI v1
-state: pending
-owner: —
+state: in-progress
+owner: mateo
 created: 2026-09-29
 updated: 2026-09-29
 ---
