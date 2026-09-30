@@ -322,6 +322,32 @@ describe('ChatGPT desktop OAuth: RFC 8252 loopback redirects', () => {
     assert.match(c.client_id, /^mcpc_/);
     assert.deepEqual(c.redirect_uris, [cb]);
   });
+
+  it('consent page CSP form-action allows loopback 302 targets', async () => {
+    // Regression test: Chrome applies form-action to the 302 that follows
+    // the consent POST. Without the loopback sources, the redirect to the
+    // desktop app's http://127.0.0.1:<port>/callback is blocked and the
+    // approval silently dies on the consent page.
+    const reg = await registerClient(['http://127.0.0.1:54321/callback'], 'CSP check');
+    assert.equal(reg.status, 201);
+    const { client_id } = await reg.json();
+    const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
+    const start = await req(authorizeUrl(client_id, challenge,
+      { redirect_uri: 'http://127.0.0.1:54321/callback' }));
+    assert.equal(start.status, 302);
+    const gh = new URL(start.headers.get('location'));
+    stubGitHub(DAVID_ID);
+    const cb = await req(`/auth/github/callback?code=gh-code&state=${gh.searchParams.get('state')}`);
+    const cookie = /^hub_session=[^;]+/.exec(cb.headers.get('set-cookie'))[0];
+    const resume = new URL(cb.headers.get('location'));
+    const consent = await req(resume.pathname + resume.search, { headers: { cookie } });
+    assert.equal(consent.status, 200);
+    const csp = consent.headers.get('content-security-policy') || '';
+    const formAction = /form-action ([^;]+);/.exec(csp)?.[1] ?? '';
+    for (const src of ['http://127.0.0.1:*', 'http://localhost:*', 'http://[::1]:*']) {
+      assert.ok(formAction.split(' ').includes(src), `form-action allows ${src} (got: ${formAction})`);
+    }
+  });
 });
 
 describe('ChatGPT discovery: path-suffixed authorization-server metadata', () => {

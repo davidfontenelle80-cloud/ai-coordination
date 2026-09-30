@@ -559,13 +559,19 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
 
 // form-action must include the redirect targets: browsers apply it to the
 // 302 that follows the consent POST.
+// RFC 8252 loopback callbacks (http://127.0.0.1:<port>/… etc.) use an
+// ephemeral port, so the CSP needs port wildcards. Without these, Chrome
+// blocks the 302 back to the desktop app and the approval silently dies on
+// the consent page. Safe: the 302 target is always the client's own
+// validated redirect_uri (see isLoopbackRedirect), never attacker-chosen.
+const LOOPBACK_CSP_SOURCES = 'http://127.0.0.1:* http://localhost:* http://[::1]:*';
 const PAGE_HEADERS = {
   'content-type': 'text/html; charset=utf-8',
   'cache-control': 'no-store',
   'x-frame-options': 'DENY',
   'referrer-policy': 'no-referrer',
   'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; "
-    + `form-action 'self' ${ALLOWED_REDIRECT_URIS.map((u) => new URL(u).origin).join(' ')}; `
+    + `form-action 'self' ${ALLOWED_REDIRECT_URIS.map((u) => new URL(u).origin).join(' ')} ${LOOPBACK_CSP_SOURCES}; `
     + "frame-ancestors 'none'; base-uri 'none'",
 };
 
