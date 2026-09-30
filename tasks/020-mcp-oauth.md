@@ -287,3 +287,28 @@ task is needed.** Live confirmation is still part of Mateo's verification.
   consent page -> typed agent_id -> code -> token -> 21 tools ->
   get_activity -> dashboard revoke -> refresh fails. That needs David in
   the Claude connector dialog; steps handed to him on 2026-09-30.
+
+## Claude connector onboarding (Mateo, 2026-09-30 ~13:55 EDT)
+
+- David completed the consent ceremony in iPhone Safari: typed `claude`,
+  approved. The consent page rendered exactly as designed (no Cloudflare
+  block on the redirect chain).
+- Post-ceremony state found in Claude Settings → Connectors (via browser,
+  David signed in through takeover): TWO "AI Hub" custom connectors, both
+  with the correct URL https://ai-hub.davidfontenelle80.workers.dev/mcp.
+  Entry 1: Connected. Entry 2: broken duplicate ("Connection issue —
+  Reconnect"). David's earlier "no MCP server found" error came from the
+  duplicate, not the live connection.
+- Server-side proof (D1 console, read-only): agent_identities has `claude`
+  (role `agent`, not disabled); 5 live agent_tokens for `claude`, all
+  created_by `david-oauth`, none revoked; 6 oauth_refresh_tokens rows.
+  The ceremony minted real tokens end to end.
+- Cleanup: David authorized removing the dead duplicate; removed via
+  More options → Remove (verified the removed entry showed the connection
+  issue, NOT a Disconnect button). One "AI Hub" connector remains,
+  status Connected, live connection intact.
+- Initial wrong guess on record: I first told David the URL was probably
+  missing `/mcp` — it wasn't. Corrected after reading the actual connector
+  config instead of guessing.
+- NOT YET PROVEN: functional test — Claude actually invoking a hub tool
+  (get_activity) through the connector. Needs David in his Claude app.
