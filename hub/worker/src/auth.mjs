@@ -189,7 +189,10 @@ const MATEO_COMMANDS = new Set([
   'postHandoff', 'attachArtifact',
   'setAgentStatus',
   'setPriority', // task 010: coordinator-only (not in AGENT_COMMANDS).
-  'agent.issue', 'agent.revoke',
+  // NOTE (task 016): agent token issuance/revocation used to be listed here
+  // as 'agent.issue'/'agent.revoke', but they were never domain commands —
+  // they are auth-admin HTTP routes (POST /auth/agents[/revoke]) and are
+  // David-only by an explicit route check in index.mjs.
 ]);
 
 const AGENT_COMMANDS = new Set([

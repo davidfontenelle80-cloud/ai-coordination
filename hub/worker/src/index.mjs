@@ -8,8 +8,9 @@
 //   GET  /auth/github/callback  -> validate state, exchange code, set session
 //   POST /auth/logout           -> revoke session, clear cookie
 //   GET  /auth/me               -> current principal (or 401)
-//   POST /auth/agents           -> issue agent bearer token (David/Mateo only;
+//   POST /auth/agents           -> issue agent bearer token (David-only;
 //                                 plaintext token shown ONCE in the response)
+//   POST /auth/agents/revoke    -> revoke an agent bearer token (David-only)
 //   POST /api/commands          -> execute one domain command (auth + rate limit)
 //   GET  /api/tasks            -> list tasks (?status=&assignee=)
 //   GET  /api/tasks/{id}       -> one task
@@ -32,7 +33,7 @@
 
 import { d1Db } from './d1-db.mjs';
 import {
-  authenticate, authorize, issueAgentToken,
+  authenticate, issueAgentToken, revokeAgentToken,
   beginGitHubLogin, completeGitHubLogin, logout, err,
 } from './auth.mjs';
 import { executeCommand, COMMANDS } from './commands.mjs';
@@ -73,6 +74,9 @@ export default {
     const db = d1Db(env.DB);
     const url = new URL(request.url);
     const path = url.pathname;
+    // Task 016: detect bearer attempts up front so the error path below can
+    // rate-limit brute-force guessing (only failures are counted).
+    const isBearerAttempt = /^Bearer\s+/i.test((request.headers.get('authorization') || '').trim());
 
     try {
       // -- GitHub OAuth -------------------------------------------------
@@ -101,11 +105,13 @@ export default {
         return json({ ok: true, principal: sanitizePrincipal(principal) });
       }
 
+      // -- Agent token admin (task 016): David-only. Plaintext tokens are
+      // shown ONCE here and never stored — only the SHA-256 hash persists.
       if (path === '/auth/agents' && request.method === 'POST') {
         const principal = await authenticate(db, request);
         if (!principal) return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
-        if (!authorize(principal, 'agent.issue')) {
-          return json({ ok: false, code: 'FORBIDDEN', message: 'not permitted' }, 403);
+        if (principal.kind !== 'david') {
+          return json({ ok: false, code: 'FORBIDDEN', message: 'token issuance is David-only' }, 403);
         }
         let body;
         try {
@@ -113,13 +119,31 @@ export default {
         } catch {
           return json({ ok: false, code: 'BAD_REQUEST', message: 'JSON body required' }, 400);
         }
-        const by = principal.kind === 'david' ? 'david' : principal.agent_id;
         const issued = await issueAgentToken(db,
-          { agent_id: body.agent_id, display_name: body.display_name, role: body.role },
-          { by });
+          { agent_id: body.agent_id, display_name: body.display_name, role: body.role || 'agent' },
+          { by: 'david' });
         // Plaintext token is shown ONCE — it is never stored and cannot be
         // retrieved again. The caller must copy it now.
-        return json({ ok: true, token_id: issued.token_id, token: issued.token }, 201);
+        return json({ ok: true, token_id: issued.token_id, agent_id: body.agent_id, token: issued.token }, 201);
+      }
+
+      if (path === '/auth/agents/revoke' && request.method === 'POST') {
+        const principal = await authenticate(db, request);
+        if (!principal) return json({ ok: false, code: 'AUTH_REQUIRED', message: 'authentication required' }, 401);
+        if (principal.kind !== 'david') {
+          return json({ ok: false, code: 'FORBIDDEN', message: 'token revocation is David-only' }, 403);
+        }
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, code: 'BAD_REQUEST', message: 'JSON body required' }, 400);
+        }
+        if (!body.token_id || typeof body.token_id !== 'string') {
+          return json({ ok: false, code: 'VALIDATION_FAILED', message: 'token_id is required' }, 400);
+        }
+        const revoked = await revokeAgentToken(db, body.token_id, { by: 'david' });
+        return json({ ok: true, ...revoked }, 200);
       }
 
       // -- Command API (task 009) ------------------------------------
@@ -172,6 +196,20 @@ export default {
       // error, a decode failure, a programming bug — must not masquerade as
       // an authentication failure. (ChatGPT 009 review.)
       if (e && typeof e.code === 'string' && e.code.startsWith('AUTH_')) {
+        // Task 016 brute-force protection: a burst of failed bearer attempts
+        // from one IP is throttled. Successful logins never touch this
+        // bucket, so legitimate polling agents are unaffected.
+        if (isBearerAttempt && BEARER_FAIL_CODES.has(e.code)) {
+          const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+          const brl = bearerFailLimiter.check(`bearer-fail:${ip}`);
+          if (!brl.ok) {
+            return json({
+              ok: false, code: 'RATE_LIMITED',
+              message: `too many failed authentication attempts; retry in ${Math.ceil(brl.retryAfterMs / 1000)}s`,
+              retryable: true, retry_after_ms: brl.retryAfterMs,
+            }, 429, { 'retry-after': String(Math.ceil(brl.retryAfterMs / 1000)) });
+          }
+        }
         return authError(e);
       }
       console.error('unhandled worker error:', e);
@@ -198,6 +236,12 @@ function commandHttpStatus(code) {
 
 const MAX_COMMAND_BYTES = 1024 * 1024; // 1 MiB
 const commandLimiter = createRateLimiter({ limit: 120, windowMs: 60_000 });
+
+// Task 016: brute-force guard for bearer tokens. Counts FAILED bearer
+// attempts per client IP only — 20/min is far above any legitimate client,
+// and successful authentications never increment the counter.
+const bearerFailLimiter = createRateLimiter({ limit: 20, windowMs: 60_000 });
+const BEARER_FAIL_CODES = new Set(['AUTH_BAD_TOKEN', 'AUTH_TOKEN_REVOKED', 'AUTH_AGENT_DISABLED']);
 
 async function handleCommand(request, db) {
   const principal = await authenticate(db, request);

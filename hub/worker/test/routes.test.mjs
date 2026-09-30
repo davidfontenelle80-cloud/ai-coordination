@@ -593,3 +593,88 @@ describe('task 015 chat UI + home-screen icons', () => {
     assert.equal(posted[posted.length - 1].actor_id, 'david');
   });
 });
+
+describe('task 016 per-agent bearer tokens', () => {
+  const davidCookie = async () => {
+    const setCookie = await loginAsDavid();
+    const sessionId = /^hub_session=([^;]+)/.exec(setCookie)[1];
+    return `hub_session=${sessionId}`;
+  };
+
+  const postAuth = (path, headers = {}, body = {}) =>
+    handler.fetch(new Request(`https://hub.example.com${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    }), env);
+
+  async function issueAsDavid(agent_id, role = 'agent') {
+    const cookie = await davidCookie();
+    const r = await postAuth('/auth/agents', { cookie }, { agent_id, role });
+    assert.equal(r.status, 201);
+    return r.json();
+  }
+
+  it('a Mateo-role agent cannot issue tokens — issuance is David-only (403)', async () => {
+    const { token } = await issueAsDavid('m1', 'mateo');
+    const r = await postAuth('/auth/agents',
+      { authorization: `Bearer ${token}` }, { agent_id: 'chatgpt', role: 'agent' });
+    assert.equal(r.status, 403);
+    assert.equal((await r.json()).code, 'FORBIDDEN');
+  });
+
+  it('David can revoke a token; it then authenticates as 401', async () => {
+    const cookie = await davidCookie();
+    const { token, token_id } = await issueAsDavid('claude');
+    const before = await get('/auth/me', { authorization: `Bearer ${token}` });
+    assert.equal(before.status, 200);
+
+    const rev = await postAuth('/auth/agents/revoke', { cookie }, { token_id });
+    assert.equal(rev.status, 200);
+    assert.equal((await rev.json()).token_id, token_id);
+
+    const after = await get('/auth/me', { authorization: `Bearer ${token}` });
+    assert.equal(after.status, 401);
+    assert.equal((await after.json()).code, 'AUTH_TOKEN_REVOKED');
+  });
+
+  it('revoking an unknown token_id is 400', async () => {
+    const cookie = await davidCookie();
+    const r = await postAuth('/auth/agents/revoke', { cookie }, { token_id: 'tok_nope' });
+    assert.equal(r.status, 400);
+    assert.equal((await r.json()).code, 'AUTH_UNKNOWN_TOKEN');
+  });
+
+  it('an agent cannot revoke tokens (403); unauthenticated revoke is 401', async () => {
+    const { token, token_id } = await issueAsDavid('chatgpt');
+    const asAgent = await postAuth('/auth/agents/revoke',
+      { authorization: `Bearer ${token}` }, { token_id });
+    assert.equal(asAgent.status, 403);
+
+    const noAuth = await postAuth('/auth/agents/revoke', {}, { token_id });
+    assert.equal(noAuth.status, 401);
+  });
+
+  it('brute-force: >20 failed bearer attempts from one IP are throttled (429)', async () => {
+    const ip = { 'cf-connecting-ip': '10.9.9.9' };
+    let last;
+    for (let i = 0; i < 21; i++) {
+      last = await get('/auth/me', { authorization: 'Bearer <redacted>', ...ip });
+    }
+    assert.equal(last.status, 429);
+    assert.equal((await last.json()).code, 'RATE_LIMITED');
+    // A different client is unaffected.
+    const other = await get('/auth/me',
+      { authorization: 'Bearer <redacted>', 'cf-connecting-ip': '10.9.9.10' });
+    assert.equal(other.status, 401);
+  });
+
+  it('dashboard JS carries the issue-token affordance', async () => {
+    const cookie = await davidCookie();
+    const js = await (await get('/dashboard/app.js', { cookie })).text();
+    assert.ok(js.includes('Issue agent token'), 'menu entry');
+    assert.ok(js.includes("'/auth/agents'"), 'issuance endpoint');
+    assert.ok(js.includes('mateo-watcher'), 'agent picker lists the watcher');
+    assert.ok(js.includes('copy it now'), 'copy-once warning');
+  });
+});

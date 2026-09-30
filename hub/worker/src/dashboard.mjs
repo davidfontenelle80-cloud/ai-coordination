@@ -877,14 +877,28 @@ var MENU_COMMANDS = [
   { id: 'createTask', label: 'Create task', hint: 'type "title | goal"', needsTask: false },
   { id: 'setPriority', label: 'Set priority', hint: 'set a task priority', needsTask: true },
   { id: 'requestDecision', label: 'Request decision', hint: 'ask David a question', needsTask: false },
+  { id: 'issueToken', label: 'Issue agent token', hint: 'mint a token for an agent', needsAgent: true },
 ];
 
-var chatSel = { cmd: 'postMessage', taskId: null };
+// Task 016: the three team agents David can mint tokens for. role is always
+// 'agent' (least privilege) — issuance creates the identity row if needed.
+var AGENTS_MENU = [
+  { id: 'chatgpt', label: 'ChatGPT' },
+  { id: 'claude', label: 'Claude' },
+  { id: 'mateo-watcher', label: 'Mateo watcher' },
+];
+
+var chatSel = { cmd: 'postMessage', taskId: null, agentId: null };
 var menuStep = 'cmd';
 
 function menuLabel(id) {
   var c = MENU_COMMANDS.filter(function (x) { return x.id === id; })[0];
   return c ? c.label : id;
+}
+
+function agentLabel(id) {
+  var a = AGENTS_MENU.filter(function (x) { return x.id === id; })[0];
+  return a ? a.label : id;
 }
 
 function toggleMenu() {
@@ -904,6 +918,12 @@ function renderMenu() {
     html += '<div class="menuhead">Commands</div>';
     html += MENU_COMMANDS.map(function (c, i) {
       return '<button data-mi="' + i + '"><b>' + esc(c.label) + '</b><small>' + esc(c.hint) + '</small></button>';
+    }).join('');
+  } else if (menuStep === 'agent') {
+    // Task 016: pick which team agent gets the new token.
+    html += '<div class="menuhead">Pick an agent — ' + esc(menuLabel(chatSel.cmd)) + '</div>';
+    html += AGENTS_MENU.map(function (a) {
+      return '<button data-ma="' + esc(a.id) + '"><b>' + esc(a.label) + '</b><small>role: agent</small></button>';
     }).join('');
   } else {
     html += '<div class="menuhead">Pick a task — ' + esc(menuLabel(chatSel.cmd)) + '</div>';
@@ -925,10 +945,22 @@ function renderMenu() {
         if (ev && ev.stopPropagation) ev.stopPropagation();
         var c = MENU_COMMANDS[Number(b.getAttribute('data-mi'))];
         chatSel.cmd = c.id;
+        chatSel.agentId = null;
         if (c.needsTask) { menuStep = 'task'; renderMenu(); }
+        else if (c.needsAgent) { menuStep = 'agent'; renderMenu(); }
         else { chatSel.taskId = null; hideMenu(); renderChips(); focusInput(); }
       };
     })(btns[i]);
+  }
+  var abtns = menu.querySelectorAll('button[data-ma]');
+  for (var k = 0; k < abtns.length; k++) {
+    (function (b) {
+      b.onclick = function (ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        chatSel.agentId = b.getAttribute('data-ma');
+        hideMenu(); renderChips(); focusInput();
+      };
+    })(abtns[k]);
   }
   var tbtns = menu.querySelectorAll('button[data-mt]');
   for (var j = 0; j < tbtns.length; j++) {
@@ -954,13 +986,18 @@ function renderChips() {
     html += '<span class="tchip">▸ ' + esc(taskTitle(chatSel.taskId)) +
       ' <button data-chip="task" aria-label="Clear task">✕</button></span>';
   }
+  if (chatSel.agentId) {
+    html += '<span class="tchip">▸ ' + esc(agentLabel(chatSel.agentId)) +
+      ' <button data-chip="agent" aria-label="Clear agent">✕</button></span>';
+  }
   row.innerHTML = html;
   row.hidden = !html;
   var btns = row.querySelectorAll('button[data-chip]');
   for (var i = 0; i < btns.length; i++) {
     (function (b) {
       b.onclick = function () {
-        if (b.getAttribute('data-chip') === 'cmd') chatSel.cmd = 'postMessage';
+        if (b.getAttribute('data-chip') === 'cmd') { chatSel.cmd = 'postMessage'; chatSel.agentId = null; }
+        else if (b.getAttribute('data-chip') === 'agent') chatSel.agentId = null;
         else chatSel.taskId = null;
         renderChips();
       };
@@ -1084,27 +1121,51 @@ function sendChat() {
     var f = { question: text };
     if (taskId) f.task_id = taskId;
     p = cmd('requestDecision', f);
+  } else if (action === 'issueToken') {
+    // Task 016: David-only token issuance. The plaintext token is returned
+    // once — it goes into the composer box so David can copy it.
+    if (!chatSel.agentId) return setStatus(st, false, 'pick an agent — tap / first');
+    showTyping('Issuing token…');
+    p = api('/auth/agents', {
+      method: 'POST',
+      body: JSON.stringify({ agent_id: chatSel.agentId, role: 'agent' }),
+    });
   } else {
     return setStatus(st, false, 'unknown command');
   }
-  // Optimistic echo + in-flow typing indicator.
-  var echo = {
-    author: 'david', body: text, kind: 'message', ts: Date.now(),
-    task: taskId ? taskTitle(taskId) : '', seq: 'p' + Date.now(), pending: true,
-  };
-  state.pending.push(echo);
-  renderThread();
-  showTyping(typingLabel(taskId));
+  // Optimistic echo + in-flow typing indicator (not for token issuance —
+  // that is an admin action, not a chat message).
+  var echo = null;
+  if (action !== 'issueToken') {
+    echo = {
+      author: 'david', body: text, kind: 'message', ts: Date.now(),
+      task: taskId ? taskTitle(taskId) : '', seq: 'p' + Date.now(), pending: true,
+    };
+    state.pending.push(echo);
+    renderThread();
+    showTyping(typingLabel(taskId));
+  }
   p.then(function (r) {
     hideTyping();
     if (r && r.body && r.body.ok) {
-      setStatus(st, true, 'sent #' + r.body.seq);
-      input.value = '';
-      try { sessionStorage.setItem(DRAFT_KEY, ''); } catch (e) {}
-      autoresize(input);
+      if (action === 'issueToken') {
+        input.value = r.body.token || '';
+        try { sessionStorage.setItem(DRAFT_KEY, ''); } catch (e) {}
+        autoresize(input);
+        setStatus(st, true, 'Token issued for ' + agentLabel(chatSel.agentId) +
+          ' — copy it now; it will not be shown again.');
+        chatSel.cmd = 'postMessage';
+        chatSel.agentId = null;
+        renderChips();
+      } else {
+        setStatus(st, true, 'sent #' + r.body.seq);
+        input.value = '';
+        try { sessionStorage.setItem(DRAFT_KEY, ''); } catch (e) {}
+        autoresize(input);
+      }
       loadAll();
     } else {
-      removePending(echo);
+      if (echo) removePending(echo);
       renderThread();
       setStatus(st, false, (r && r.body && (r.body.code + ': ' + r.body.message)) || 'failed');
     }
