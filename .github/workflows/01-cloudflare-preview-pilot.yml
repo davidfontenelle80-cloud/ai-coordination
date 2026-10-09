@@ -1,0 +1,52 @@
+name: "01 — Cloudflare preview pilot preflight (NO DEPLOY)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      decision:
+        description: "Type PREFLIGHT_ONLY to acknowledge pilot decision. This workflow never deploys."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-preview-preflight
+  cancel-in-progress: false
+
+jobs:
+  pilot-preflight:
+    name: "Tests and preview environment validation"
+    if: ${{ inputs.decision == 'PREFLIGHT_ONLY' }}
+    runs-on: ubuntu-latest
+    environment: cloudflare-preview
+    timeout-minutes: 10
+    steps:
+      - name: Check out reviewed code
+        uses: actions/checkout@v4
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run hub tests (no deploy)
+        working-directory: hub
+        run: npm test
+      - name: Confirm expected preview secrets are available (never log values)
+        shell: bash
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [[ -z "${CF_TOKEN}" ]]; then
+            echo "::error::Missing CLOUDFLARE_API_TOKEN in cloudflare-preview GitHub Environment"
+            exit 1
+          fi
+          if [[ -z "${CF_ACCOUNT_ID}" ]]; then
+            echo "::error::Missing CLOUDFLARE_ACCOUNT_ID in cloudflare-preview GitHub Environment"
+            exit 1
+          fi
+          echo "Preview environment secret presence: PASS (values not shown)"
+      - name: State deployment guardrail
+        run: |
+          echo "PREFLIGHT ONLY. No Cloudflare deploy, database migration, external messages or spending."
