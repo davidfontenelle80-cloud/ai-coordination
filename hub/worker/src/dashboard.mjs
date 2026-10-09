@@ -65,7 +65,6 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
           <option value="in-progress">in-progress</option>
           <option value="blocked">blocked</option>
           <option value="under-review">under-review</option>
-          <option value="completed">completed</option>
         </select>
         <select id="assigneeFilter"><option value="">All agents</option></select>
       </div>
@@ -80,6 +79,11 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     </section>
   </div>
 
+  <section id="completedSection" class="panel completed-sec">
+    <h2><button id="completedToggle" class="sechead" aria-expanded="true" aria-controls="completedList"><span id="completedCaret" class="caret">▾</span> Completed <span id="completedCount" class="count"></span></button></h2>
+    <div id="completedList" class="tasklist completed-list"><p class="empty">Loading…</p></div>
+  </section>
+
   <section id="chatSection" class="chat-section">
     <h2>Team chat</h2>
     <div id="threadScroll" class="thread-scroll">
@@ -89,15 +93,10 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   </section>
 </main>
 
-<div id="taskDetail" class="overlay" hidden>
-  <div class="dialog">
-    <div class="dialog-head">
-      <h3 id="detailTitle">Task</h3>
-      <button id="detailClose">✕</button>
-    </div>
-    <div id="detailBody" class="dialog-body"><p class="empty">Loading…</p></div>
-  </div>
-</div>
+<section id="taskDetailScreen" class="screen" hidden aria-labelledby="detailTitle">
+  <header class="screen-head detail-head"><button id="detailBack">← Back</button><h1 id="detailTitle" tabindex="-1">Task</h1></header>
+  <main id="detailBody" class="screen-body detail-body"><p class="empty">Loading…</p></main>
+</section>
 
 <div id="composerWrap">
   <div id="typingRow" class="typing" hidden></div>
@@ -214,15 +213,6 @@ main { max-width: 1200px; margin: 0 auto; padding: 16px 20px; }
   border-radius: var(--radius); padding: 8px 14px; margin-bottom: 8px; font-size: 13px;
 }
 .alert.bad { background: #3a1a1a; border-color: var(--bad); color: #ffb3b3; }
-.overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 20;
-  display: flex; align-items: center; justify-content: center; padding: 20px;
-}
-.overlay[hidden] { display: none; }
-.dialog {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-  max-width: 760px; width: 100%; max-height: 86vh; display: flex; flex-direction: column;
-}
 /* Task 018: real screens; the dashboard retains its existing layout. */
 #dashboardScreen[hidden], .screen[hidden] { display: none !important; }
 body.subscreen { padding-bottom: 0; }
@@ -267,14 +257,38 @@ body.subscreen { padding-bottom: 0; }
   padding: 10px 12px; margin: 8px 0;
 }
 .tokwarn { font-size: 13px; color: var(--warn); }
-.dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
-.dialog-head h3 { margin: 0; font-size: 16px; }
-.dialog-body { padding: 14px 16px; overflow: auto; font-size: 14px; }
-.dialog-body .sec { margin-bottom: 14px; }
-.dialog-body .sec > h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.detail-body { font-size: 14px; }
+.detail-body .sec { margin-bottom: 14px; }
+.detail-body .sec > h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .msg { border-left: 3px solid var(--line); padding: 4px 10px; margin: 6px 0; }
 .msg .who { font-size: 12px; color: var(--accent); }
 pre.ev { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 12px; overflow: auto; }
+/* ---- Board UX: completed section + task thread screen ---- */
+.sechead {
+  background: none; border: none; padding: 0;
+  font: inherit; color: inherit; display: inline-flex; align-items: center; gap: 8px;
+}
+.sechead .caret { color: var(--muted); font-size: 12px; }
+.completed-sec { margin-top: 18px; }
+.completed-list { max-height: 340px; }
+.completed-list[hidden] { display: none; }
+#taskDetailScreen .screen-head {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.dgoal { font-size: 15px; margin: 0 0 6px; }
+.dmeta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 12px; }
+.dmeta .meta { font-size: 12px; color: var(--muted); }
+.evline {
+  border-left: 3px solid var(--line); padding: 4px 10px; margin: 6px 0;
+  font-size: 12.5px; color: var(--muted);
+}
+.evline .ekind { color: var(--accent); }
+.evline .ets { font-size: 11px; }
+.dnote {
+  font-size: 13px; color: var(--warn); background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 10px 0;
+}
 /* ---- Team chat (task 015) ---- */
 .cmdstatus { font-size: 12px; color: var(--muted); }
 .cmdstatus.ok { color: var(--mateo); } .cmdstatus.err { color: var(--bad); }
@@ -622,10 +636,13 @@ function renderNeedsMateo() {
 function renderTasks() {
   var sf = document.getElementById('statusFilter').value;
   var af = document.getElementById('assigneeFilter').value;
-  var rows = state.tasks.filter(function (t) {
+  // Board UX: the main board lists ACTIVE tasks only; completed tasks live
+  // in their own section below (renderCompleted).
+  var active = state.tasks.filter(function (t) { return t.status !== 'completed'; });
+  var rows = active.filter(function (t) {
     return (!sf || t.status === sf) && (!af || t.assignee === af);
   });
-  document.getElementById('taskCount').textContent = rows.length + ' / ' + state.tasks.length;
+  document.getElementById('taskCount').textContent = rows.length + ' of ' + active.length + ' active';
   var list = document.getElementById('taskList');
   if (!rows.length) { list.innerHTML = '<p class="empty">No tasks match.</p>'; return; }
   list.innerHTML = rows.map(function (t) {
@@ -655,32 +672,110 @@ function renderTasks() {
   }
 }
 
+// ---- Board UX: completed section ---------------------------------------------
+// The main board lists active tasks only; completed tasks live here.
+// Rows are tappable (openTask) and the agent filter applies to this list too.
+
+var completedOpen = true;
+
+function renderCompleted() {
+  var af = document.getElementById('assigneeFilter').value;
+  var done = state.tasks.filter(function (t) {
+    return t.status === 'completed' && (!af || t.assignee === af);
+  });
+  document.getElementById('completedCount').textContent = String(done.length);
+  var list = document.getElementById('completedList');
+  if (!done.length) { list.innerHTML = '<p class="empty">No completed tasks.</p>'; return; }
+  list.innerHTML = done.map(function (t) {
+    return '<button class="taskrow" data-task="' + esc(t.task_id) + '">' +
+      '<span class="t">' + esc(t.title) + '</span>' +
+      '<span class="pill completed">completed</span>' +
+      '<span class="meta">' + esc(t.assignee || 'unassigned') + ' · ' + esc(t.priority || 'normal') +
+        ' · v' + esc(t.version) + ' · ' + esc(ts(t.updated_at)) + '</span>' +
+      '<span></span>' +
+    '</button>';
+  }).join('');
+  list.querySelectorAll('.taskrow').forEach(function (b) {
+    b.onclick = function () { openTask(b.getAttribute('data-task')); };
+  });
+}
+
+// ---- Board UX: thread-style task detail screen --------------------------------
+// Tapping a task opens a full screen (not a modal): title, goal, status,
+// priority, assignee, then one thread mixing messages (as .msg blocks) with
+// the task's activity events (as short .evline rows), oldest first. The
+// sticky Back button returns to the board at the same scroll spot.
+
+function eventSummary(e) {
+  var p = e.payload || {};
+  var who = e.actor_id || e.submitted_by || '?';
+  switch (e.event_type) {
+    case 'task.created': return 'created by ' + esc(who);
+    case 'task.changed':
+      if (p.field === 'status') return esc(p.from || '?') + ' → ' + esc(p.to || '?');
+      return esc(p.field || 'changed') +
+        (p.from !== undefined ? ': ' + esc(p.from) + ' → ' + esc(p.to) : '');
+    case 'result.submitted':
+      return 'result by ' + esc(who) + ': ' + esc(String(p.summary || '').slice(0, 120));
+    case 'review.recorded': return 'review by ' + esc(who) + ': ' + esc(p.outcome || '?');
+    case 'decision.requested':
+      return 'decision asked: ' + esc(String(p.question || '').slice(0, 120));
+    case 'decision.resolved':
+      return 'decision resolved: ' + esc(String(p.resolution || '').slice(0, 120));
+    case 'handoff.posted': return 'handoff by ' + esc(who);
+    case 'artifact.attached': return 'artifact: ' + esc(p.name || p.uri || '');
+    default: return esc(who);
+  }
+}
+
+function threadHtml(id, rs) {
+  var items = [];
+  (rs.recent_messages || []).forEach(function (m) {
+    items.push({ ts: Number(m.created_at) || 0, html:
+      '<div class="msg"><span class="who">' + esc(m.actor_id || '?') +
+      ' · ' + esc(m.kind || 'message') + ' · ' + esc(ts(m.created_at)) + '</span><br>' +
+      esc(m.body) + '</div>' });
+  });
+  // message.posted events are already shown as messages above; the feed
+  // carries everything else (status changes, results, reviews, …).
+  state.activity.filter(function (e) {
+    return e.task_id === id && e.event_type !== 'message.posted';
+  }).forEach(function (e) {
+    items.push({ ts: Number(e.created_at) || 0, html:
+      '<div class="evline"><span class="ekind">' + esc(e.event_type) + '</span> ' +
+      eventSummary(e) +
+      ' <span class="ets">#' + esc(e.seq) + ' · ' + esc(ts(e.created_at)) + '</span></div>' });
+  });
+  items.sort(function (a, b) { return a.ts - b.ts; });
+  if (!items.length) return '<p class="empty">No messages or events yet.</p>';
+  return items.map(function (x) { return x.html; }).join('');
+}
+
 function openTask(id) {
-  var dlg = document.getElementById('taskDetail');
+  screenScroll.taskDetail = 0; // always start a fresh thread view at the top
+  navigateScreen('taskDetail');
   var body = document.getElementById('detailBody');
-  dlg.hidden = false;
   body.innerHTML = '<p class="empty">Loading…</p>';
   api('/api/tasks/' + encodeURIComponent(id) + '/resume').then(function (r) {
-    if (!r) return;
-    var rs = r.body.resume;
+    if (!r || currentScreen !== 'taskDetail') return;
+    var rs = r.body.resume || {};
     var task = rs.task || {};
+    var isDone = (rs.status || task.status) === 'completed';
     document.getElementById('detailTitle').textContent = task.title || id;
     var h = '';
-    h += sec('State', '<p><b>' + esc(rs.status) + '</b> · assignee ' + esc(rs.assignee || 'unassigned') +
-      ' · priority ' + esc(task.priority || 'normal') + ' · version ' + esc(rs.version) + '</p>' +
-      (task.goal ? '<p>' + esc(task.goal) + '</p>' : ''));
+    if (task.goal) h += '<p class="dgoal">' + esc(task.goal) + '</p>';
+    h += '<div class="dmeta">' +
+      '<span class="pill ' + esc(rs.status || '') + '">' + esc(rs.status || '?') + '</span>' +
+      '<span class="meta">assignee ' + esc(rs.assignee || 'unassigned') + '</span>' +
+      '<span class="meta">priority ' + esc(task.priority || 'normal') + '</span>' +
+      '<span class="meta">v' + esc(rs.version) + ' · ' + esc(ts(task.updated_at)) + '</span>' +
+    '</div>';
     if (rs.blocked_reason) h += sec('Blocker', '<p>' + esc(rs.blocked_reason) + '</p>');
     if (rs.latest_result) h += sec('Latest result', '<p>' + esc(rs.latest_result.summary || '') +
       ' <span style="color:var(--muted)">by ' + esc(rs.latest_result.actor_id || '?') + '</span></p>');
     if (rs.latest_review) h += sec('Latest review', '<p>' + esc(rs.latest_review.outcome) +
       (rs.latest_review.notes ? ' — ' + esc(rs.latest_review.notes) : '') + '</p>');
-    if (rs.recent_messages && rs.recent_messages.length) {
-      h += sec('Messages', rs.recent_messages.map(function (m) {
-        return '<div class="msg"><span class="who">' + esc(m.actor_id || '?') +
-          ' · ' + esc(m.kind || 'message') + ' · ' + esc(ts(m.created_at)) + '</span><br>' +
-          esc(m.body) + '</div>';
-      }).join(''));
-    }
+    h += sec('Thread', threadHtml(id, rs));
     var decs = (rs.open_decisions || []).concat(rs.resolved_decisions || []);
     if (decs.length) {
       h += sec('Decisions', decs.map(function (d) {
@@ -696,14 +791,26 @@ function openTask(id) {
       h += sec('Latest handoff', '<p><b>' + esc(rs.latest_handoff.agent_id) + '</b>: ' +
         esc(rs.latest_handoff.goal || '') + '</p>');
     }
-    h += '<div class="sec"><h4>Actions</h4><div class="actions" style="display:flex;gap:8px;flex-wrap:wrap">' +
-      '<button data-a="msg">Post message</button>' +
-      '<button data-a="start">Start</button>' +
-      '<button data-a="block">Block</button>' +
-      '<button data-a="priority">Set priority</button>' +
-      '<button data-a="decision">Request decision</button>' +
-    '</div><input type="text" id="detailInput" placeholder="Action input (message, reason, priority, question)" style="width:100%;margin-top:8px">' +
-    '<span id="detailStatus" class="cmdstatus"></span></div>';
+    if (isDone) {
+      // completed is terminal in the hub's state machine (event-core
+      // STATUS_TRANSITIONS['completed'] = []): no reopen command exists,
+      // so state-changing actions stay hidden here rather than failing.
+      h += '<div class="dnote">This task is completed. Reopening is not supported yet — completed is a final state in the hub.</div>';
+      h += '<div class="sec"><h4>Actions</h4><div class="actions" style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button data-a="msg">Post message</button>' +
+        '<button data-a="decision">Request decision</button>' +
+      '</div><input type="text" id="detailInput" placeholder="Message or question" style="width:100%;margin-top:8px">' +
+      '<span id="detailStatus" class="cmdstatus"></span></div>';
+    } else {
+      h += '<div class="sec"><h4>Actions</h4><div class="actions" style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button data-a="msg">Post message</button>' +
+        '<button data-a="start">Start</button>' +
+        '<button data-a="block">Block</button>' +
+        '<button data-a="priority">Set priority</button>' +
+        '<button data-a="decision">Request decision</button>' +
+      '</div><input type="text" id="detailInput" placeholder="Action input (message, reason, priority, question)" style="width:100%;margin-top:8px">' +
+      '<span id="detailStatus" class="cmdstatus"></span></div>';
+    }
     body.innerHTML = h;
     body.querySelectorAll('[data-a]').forEach(function (b) {
       b.onclick = function () { detailAction(id, b.getAttribute('data-a')); };
@@ -731,16 +838,20 @@ function detailAction(id, a) {
   });
 }
 
-document.getElementById('detailClose').onclick = function () {
-  document.getElementById('taskDetail').hidden = true;
+// Board UX: the task thread is a full screen now; the sticky Back button
+// returns to the board at the same scroll spot (screen router restores it).
+document.getElementById('detailBack').onclick = backScreen;
+document.getElementById('completedToggle').onclick = function () {
+  completedOpen = !completedOpen;
+  document.getElementById('completedList').hidden = !completedOpen;
+  document.getElementById('completedCaret').textContent = completedOpen ? '▾' : '▸';
+  this.setAttribute('aria-expanded', completedOpen ? 'true' : 'false');
 };
-document.getElementById('taskDetail').addEventListener('click', function (ev) {
-  if (ev.target.id === 'taskDetail') document.getElementById('taskDetail').hidden = true;
-});
 
 // ---- Task 018: extensible in-memory screen router -----------------------------
 var screens = {
   dashboard: { element: 'dashboardScreen' },
+  taskDetail: { element: 'taskDetailScreen', title: 'detailTitle' },
   tokens: { element: 'tokensScreen', title: 'tokensTitle', enter: loadTokens },
   issuedToken: { element: 'issuedTokenScreen', title: 'issuedTokenTitle', leave: clearIssuedToken },
 };
@@ -767,7 +878,6 @@ function navigateScreen(name, back) {
   });
   document.body.classList.toggle('subscreen', name !== 'dashboard');
   hideMenu();
-  document.getElementById('taskDetail').hidden = true;
   document.getElementById('cmdInput').blur();
   window.scrollTo(0, screenScroll[name] || 0);
   if (screens[name].title) document.getElementById(screens[name].title).focus({ preventScroll: true });
@@ -1438,6 +1548,7 @@ function render() {
   renderNeedsDavid();
   renderNeedsMateo();
   renderTasks();
+  renderCompleted();
   renderAgents();
   renderActivity();
   renderThread();
@@ -1448,7 +1559,7 @@ function render() {
 
 document.getElementById('refreshBtn').onclick = loadAll;
 document.getElementById('statusFilter').onchange = renderTasks;
-document.getElementById('assigneeFilter').onchange = renderTasks;
+document.getElementById('assigneeFilter').onchange = function () { renderTasks(); renderCompleted(); };
 document.getElementById('logoutBtn').onclick = function () {
   api('/auth/logout', { method: 'POST' }).then(function () { window.location = '/auth/github/login'; });
 };

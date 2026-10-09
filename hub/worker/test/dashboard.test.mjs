@@ -4,11 +4,16 @@ import vm from 'node:vm';
 import { DASHBOARD_HTML, DASHBOARD_JS, DASHBOARD_CSS } from '../src/dashboard.mjs';
 
 // Small DOM harness runs the actual embedded app handlers without a new dependency.
-function app() {
+// Pass respond(path, opts) to customize fetch JSON per test; default keeps the
+// legacy fixed response.
+function app(respond) {
   const nodes = new Map();
   function element() {
+    const attrs = {};
     return { hidden: true, value: '', style: {}, textContent: '', offsetHeight: 100,
       innerHTML: '', focus() {}, blur() {}, addEventListener() {},
+      getAttribute(name) { return name in attrs ? attrs[name] : null; },
+      setAttribute(name, v) { attrs[name] = String(v); },
       replaceChildren() { this.innerHTML = ''; },
       querySelectorAll(selector) {
         const attr = /\[([^\]]+)\]/.exec(selector)?.[1];
@@ -30,7 +35,10 @@ function app() {
     crypto: { randomUUID: () => 'test' }, sessionStorage: { setItem() {} },
     fetch: async (path, opts) => {
       requests.push({ path, opts });
-      return { status: 200, json: async () => ({ ok: true, tokens: [], token: 'tok_test.ONE_TIME_SECRET' }) };
+      const body = respond
+        ? respond(path, opts)
+        : { ok: true, tokens: [], token: 'tok_test.ONE_TIME_SECRET' };
+      return { status: 200, json: async () => body };
     },
   });
   vm.runInContext(DASHBOARD_JS.slice(0, DASHBOARD_JS.lastIndexOf('initComposer();')), context);
@@ -176,5 +184,135 @@ describe('task 018 screen behavior', () => {
     assert.ok(DASHBOARD_HTML.includes('id="issuedTokenBack"'));
     assert.match(DASHBOARD_CSS, /\.screen button \{ min-width: 44px; min-height: 44px;/);
     for (const edge of ['top', 'bottom', 'left', 'right']) assert.ok(DASHBOARD_CSS.includes('env(safe-area-inset-' + edge + ')'));
+  });
+});
+
+describe('Board UX: completed section + thread view', () => {
+  const TASKS = [
+    { task_id: 't1', title: 'Active thing', status: 'in-progress', assignee: 'claude', priority: 'high', version: 3, updated_at: 1000 },
+    { task_id: 't2', title: 'Blocked thing', status: 'blocked', assignee: 'chatgpt', priority: 'normal', version: 1, updated_at: 2000 },
+    { task_id: 't9', title: 'Done thing', status: 'completed', assignee: 'claude', priority: 'low', version: 5, updated_at: 3000 },
+  ];
+  const seedTasks = a => a.run('state.tasks = ' + JSON.stringify(TASKS));
+
+  it('status filter no longer offers completed; main board lists active tasks only', () => {
+    assert.ok(!DASHBOARD_HTML.includes('value="completed"'), 'no completed option in filter');
+    const a = app(); seedTasks(a);
+    a.run('renderTasks()');
+    const html = a.document.getElementById('taskList').innerHTML;
+    assert.ok(html.includes('Active thing'));
+    assert.ok(html.includes('Blocked thing'));
+    assert.ok(!html.includes('Done thing'), 'completed task not on main board');
+    assert.equal(a.document.getElementById('taskCount').textContent, '2 of 2 active');
+  });
+
+  it('completed section lists completed tasks, is tappable, and respects the agent filter', () => {
+    const a = app(); seedTasks(a);
+    a.run('renderCompleted()');
+    const list = a.document.getElementById('completedList');
+    assert.equal(a.document.getElementById('completedCount').textContent, '1');
+    assert.ok(list.innerHTML.includes('Done thing'));
+    assert.ok(!list.innerHTML.includes('Active thing'));
+    assert.ok(list.innerHTML.includes('data-task="t9"'), 'row carries the task id');
+    // agent filter applies to the completed list too
+    a.document.getElementById('assigneeFilter').value = 'chatgpt';
+    a.run('renderCompleted()');
+    assert.ok(list.innerHTML.includes('No completed tasks.'));
+    a.document.getElementById('assigneeFilter').value = '';
+    a.run('renderCompleted()');
+    assert.ok(list.innerHTML.includes('Done thing'));
+  });
+
+  it('completed section toggle collapses and expands the list', () => {
+    const a = app(); seedTasks(a); a.run('renderCompleted()');
+    const toggle = a.document.getElementById('completedToggle');
+    const listEl = a.document.getElementById('completedList');
+    const caret = a.document.getElementById('completedCaret');
+    toggle.onclick();
+    assert.equal(listEl.hidden, true);
+    assert.equal(caret.textContent, '▸');
+    toggle.onclick();
+    assert.equal(listEl.hidden, false);
+    assert.equal(caret.textContent, '▾');
+  });
+
+  const RESUME = status => ({ ok: true, resume: {
+    task: { task_id: 't1', title: 'Active thing', goal: 'Make it work', priority: 'high', updated_at: 1000 },
+    status, assignee: 'claude', version: 3,
+    recent_messages: [{ actor_id: 'claude', kind: 'message', body: 'hello world', created_at: 2000 }],
+    open_decisions: [], resolved_decisions: [],
+  } });
+  const openSeeded = (a, status) => {
+    a.run("state.activity = [{ task_id: 't1', event_type: 'task.changed', actor_id: 'mateo', seq: 4, created_at: 1500, payload: { field: 'status', from: 'claimed', to: 'in-progress' } }]");
+    a.run("openTask('t1')");
+  };
+
+  it('tapping a task opens a full thread screen with meta, messages and events', async () => {
+    const a = app(p => p.includes('/resume') ? RESUME('in-progress') : { ok: true });
+    seedTasks(a); openSeeded(a, 'in-progress'); await flush();
+    assert.equal(a.context.currentScreen, 'taskDetail');
+    assert.equal(a.document.getElementById('taskDetailScreen').hidden, false);
+    assert.equal(a.document.getElementById('dashboardScreen').hidden, true);
+    assert.equal(a.document.getElementById('detailTitle').textContent, 'Active thing');
+    const html = a.document.getElementById('detailBody').innerHTML;
+    for (const text of ['Make it work', 'in-progress', 'claude', 'high', 'hello world',
+        'task.changed', 'claimed →', '#4', 'data-a="start"', 'data-a="msg"']) {
+      assert.ok(html.includes(text), 'thread shows ' + text);
+    }
+  });
+
+  it('the sticky Back button returns to the board', async () => {
+    const a = app(p => p.includes('/resume') ? RESUME('in-progress') : { ok: true });
+    seedTasks(a); openSeeded(a, 'in-progress'); await flush();
+    a.document.getElementById('detailBack').onclick();
+    assert.equal(a.context.currentScreen, 'dashboard');
+    assert.equal(a.document.getElementById('dashboardScreen').hidden, false);
+    assert.equal(a.document.getElementById('taskDetailScreen').hidden, true);
+    assert.equal(a.context.screenStack.length, 0);
+  });
+
+  it('completed task detail notes reopening is unsupported and hides state-changing actions', async () => {
+    const a = app(p => p.includes('/resume') ? RESUME('completed') : { ok: true });
+    seedTasks(a); openSeeded(a, 'completed'); await flush();
+    const html = a.document.getElementById('detailBody').innerHTML;
+    assert.ok(html.includes('Reopening is not supported yet'));
+    for (const act of ['data-a="start"', 'data-a="block"', 'data-a="priority"']) {
+      assert.ok(!html.includes(act), act + ' hidden on completed tasks');
+    }
+    assert.ok(html.includes('data-a="msg"'), 'post message still available');
+    assert.ok(html.includes('data-a="decision"'), 'request decision still available');
+  });
+
+  it('completed rows open the thread screen when tapped', async () => {
+    const a = app(p => p.includes('/resume') ? RESUME('completed') : { ok: true });
+    seedTasks(a);
+    const list = a.document.getElementById('completedList');
+    const realQSA = list.querySelectorAll.bind(list);
+    let wired;
+    list.querySelectorAll = s => {
+      const r = realQSA(s === '.taskrow' ? 'button[data-task]' : s);
+      if (s === '.taskrow') wired = r;
+      return r;
+    };
+    a.run('renderCompleted()');
+    assert.equal(wired.length, 1);
+    wired[0].onclick(); await flush();
+    assert.equal(a.context.currentScreen, 'taskDetail');
+    assert.equal(a.document.getElementById('detailTitle').textContent, 'Active thing');
+  });
+
+  it('markup and CSS carry the new screen affordances and no modal remnants', () => {
+    assert.ok(DASHBOARD_HTML.includes('id="taskDetailScreen"'));
+    assert.ok(DASHBOARD_HTML.includes('id="detailBack"'));
+    assert.ok(DASHBOARD_HTML.includes('id="completedSection"'));
+    assert.ok(DASHBOARD_HTML.includes('id="completedToggle"'));
+    assert.ok(DASHBOARD_HTML.includes('id="completedList"'));
+    assert.ok(!DASHBOARD_HTML.includes('id="taskDetail"'), 'old overlay id gone');
+    assert.ok(!DASHBOARD_HTML.includes('class="overlay"'), 'no modal overlay markup');
+    assert.ok(!DASHBOARD_HTML.includes('detailClose'), 'no modal close button');
+    assert.match(DASHBOARD_CSS, /#taskDetailScreen \.screen-head \{\s*position: sticky;/);
+    for (const sel of ['.completed-list', '.evline', '.sechead', '.dnote', '.dmeta']) {
+      assert.ok(DASHBOARD_CSS.includes(sel), 'CSS has ' + sel);
+    }
   });
 });
