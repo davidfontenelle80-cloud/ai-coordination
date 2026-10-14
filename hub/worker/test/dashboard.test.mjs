@@ -301,6 +301,19 @@ describe('Board UX: completed section + thread view', () => {
     assert.equal(a.document.getElementById('detailTitle').textContent, 'Active thing');
   });
 
+  it('task detail screen is outside the hidden dashboard wrapper, with composer retained inside', () => {
+    const start = DASHBOARD_HTML.indexOf('<div id="dashboardScreen">');
+    const detail = DASHBOARD_HTML.indexOf('<section id="taskDetailScreen"');
+    assert.ok(start >= 0 && detail > start, 'dashboard and task detail sections exist');
+    const beforeDetail = DASHBOARD_HTML.slice(start, detail);
+    assert.ok(beforeDetail.includes('id="composerWrap"'), 'composer remains inside dashboard');
+    // A hidden ancestor hides all its descendants even when their own hidden flag is false.
+    // Count the dashboard wrapper and its nested divs before reaching task detail.
+    const nesting = [...beforeDetail.matchAll(/<\/?div\b[^>]*>/g)].reduce((depth, [tag]) =>
+      depth + (tag.startsWith('</') ? -1 : 1), 0);
+    assert.equal(nesting, 0, 'task detail must be a sibling of dashboard, not nested inside it');
+  });
+
   it('markup and CSS carry the new screen affordances and no modal remnants', () => {
     assert.ok(DASHBOARD_HTML.includes('id="taskDetailScreen"'));
     assert.ok(DASHBOARD_HTML.includes('id="detailBack"'));

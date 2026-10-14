@@ -93,11 +93,6 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   </section>
 </main>
 
-<section id="taskDetailScreen" class="screen" hidden aria-labelledby="detailTitle">
-  <header class="screen-head detail-head"><button id="detailBack">← Back</button><h1 id="detailTitle" tabindex="-1">Task</h1></header>
-  <main id="detailBody" class="screen-body detail-body"><p class="empty">Loading…</p></main>
-</section>
-
 <div id="composerWrap">
   <div id="typingRow" class="typing" hidden></div>
   <div id="cmdMenu" class="cmdmenu" hidden></div>
@@ -111,6 +106,10 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 </div>
 
 </div>
+<section id="taskDetailScreen" class="screen" hidden aria-labelledby="detailTitle">
+  <header class="screen-head detail-head"><button id="detailBack">← Back</button><h1 id="detailTitle" tabindex="-1">Task</h1></header>
+  <main id="detailBody" class="screen-body detail-body"><p class="empty">Loading…</p></main>
+</section>
 <section id="tokensScreen" class="screen" hidden aria-labelledby="tokensTitle">
   <header class="screen-head"><button id="tokensBack">← Back</button><h1 id="tokensTitle" tabindex="-1">Agent tokens</h1></header>
   <main id="tokensBody" class="screen-body"><p class="empty">Loading…</p></main>
