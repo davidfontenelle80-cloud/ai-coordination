@@ -647,6 +647,9 @@ function loadAll() {
 // ---- header / stats / alerts -------------------------------------------
 
 function renderStats() {
+  var hour = new Date().getHours();
+  var greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  document.getElementById('greeting').textContent = greeting + ', David';
   var s = state.stats, el = document.getElementById('stats');
   if (!s) { el.innerHTML = ''; return; }
   el.innerHTML =
@@ -683,6 +686,23 @@ function renderAlerts() {
   else { box.innerHTML = ''; box.hidden = true; }
 }
 
+// Visual hierarchy from the existing task's priority and status, with no data mutations.
+function priorityLevel(task) {
+  if (!task) return 'routine';
+  var p = String(task.priority || '').toLowerCase();
+  if (task.status === 'blocked' || p === 'urgent' || p === 'critical' || p === 'high') return 'urgent';
+  if (p === 'low' || p === 'fyi' || p === 'info') return 'fyi';
+  return 'routine';
+}
+function priorityRank(task) {
+  var l = priorityLevel(task);
+  return l === 'urgent' ? 0 : l === 'routine' ? 1 : 2;
+}
+function decisionPriority(taskId) {
+  var t = state.tasks.filter(function (x) { return x.task_id === taskId; })[0];
+  return priorityLevel(t);
+}
+
 // ---- Needs David ---------------------------------------------------------
 
 function renderNeedsDavid() {
@@ -700,7 +720,8 @@ function renderNeedsDavid() {
       }).join(' · ') + '</p>';
     }
     var taskLine = d.task_id ? '<p>Task: <b>' + esc(taskTitle(d.task_id)) + '</b></p>' : '<p>Workspace-level decision</p>';
-    return '<div class="card" data-dec="' + esc(d.decision_id) + '">' +
+    return '<div class="card decision-card priority-' + esc(decisionPriority(d.task_id)) + '" data-dec="' + esc(d.decision_id) + '">' +
+      '<div class="decision-tag">Decision needed</div>' +
       '<h3 class="q">' + esc(d.question) + '</h3>' + taskLine + opts +
       '<div class="actions">' +
         '<button class="primary" data-act="approve">Approve</button>' +
@@ -811,13 +832,14 @@ function renderTasks() {
   var active = state.tasks.filter(function (t) { return t.status !== 'completed'; });
   var rows = active.filter(function (t) {
     return (!sf || t.status === sf) && (!af || t.assignee === af);
-  });
+  }).sort(function (a, b) { return priorityRank(a) - priorityRank(b); });
   document.getElementById('taskCount').textContent = rows.length + ' of ' + active.length + ' active';
   var list = document.getElementById('taskList');
   if (!rows.length) { list.innerHTML = '<p class="empty">No tasks match.</p>'; return; }
   list.innerHTML = rows.map(function (t) {
-    return '<button class="taskrow" data-task="' + esc(t.task_id) + '">' +
-      '<span class="t">' + esc(t.title) + '</span>' +
+    var priority = priorityLevel(t);
+    return '<button class="taskrow priority-' + priority + '" data-task="' + esc(t.task_id) + '">' +
+      '<span class="t">' + esc(t.title) + '<span class="priority-hint">' + (priority === 'urgent' ? 'Attention' : priority === 'fyi' ? 'FYI' : 'Routine') + '</span></span>' +
       '<span class="pill ' + esc(t.status) + '">' + esc(t.status) + '</span>' +
       '<span class="meta">' + esc(t.assignee || 'unassigned') + ' · ' + esc(t.priority || 'normal') +
         ' · v' + esc(t.version) + ' · ' + esc(ts(t.updated_at)) + '</span>' +
@@ -857,7 +879,7 @@ function renderCompleted() {
   var list = document.getElementById('completedList');
   if (!done.length) { list.innerHTML = '<p class="empty">No completed tasks.</p>'; return; }
   list.innerHTML = done.map(function (t) {
-    return '<button class="taskrow" data-task="' + esc(t.task_id) + '">' +
+    return '<button class="taskrow priority-fyi" data-task="' + esc(t.task_id) + '">' +
       '<span class="t">' + esc(t.title) + '</span>' +
       '<span class="pill completed">completed</span>' +
       '<span class="meta">' + esc(t.assignee || 'unassigned') + ' · ' + esc(t.priority || 'normal') +
@@ -901,10 +923,12 @@ function eventSummary(e) {
 function threadHtml(id, rs) {
   var items = [];
   (rs.recent_messages || []).forEach(function (m) {
+    var author = m.actor_id || '?';
     items.push({ ts: Number(m.created_at) || 0, html:
-      '<div class="msg"><span class="who">' + esc(m.actor_id || '?') +
-      ' · ' + esc(m.kind || 'message') + ' · ' + esc(ts(m.created_at)) + '</span><br>' +
-      esc(m.body) + '</div>' });
+      '<div class="msg"><div class="who"><span class="avatar" style="background:' + agentColor(author) + '">' +
+      esc(agentInitials(author)) + '</span><span>' + esc(displayName(author)) + '</span>' +
+      '<span class="reltime">' + esc(relativeTimeLabel(m.created_at)) + '</span></div>' +
+      '<div class="msgtext">' + esc(m.body) + '</div></div>' });
   });
   // message.posted events are already shown as messages above; the feed
   // carries everything else (status changes, results, reviews, …).
@@ -1206,7 +1230,7 @@ function renderActivity() {
 // an avatar (initials, per-agent color) and a name header on the first
 // message of each consecutive group.
 
-var AGENT_COLORS = { david: '#5aa9ff', mateo: '#4fd1a5', chatgpt: '#7ee787', claude: '#ff9e64' };
+var AGENT_COLORS = { david: '#f6c65c', mateo: '#59b9aa', chatgpt: '#8abedf', claude: '#f0a88d' };
 var AGENT_PALETTE = ['#c77dff', '#ffb020', '#ff6b6b', '#5ad1ff', '#a3e635', '#f472b6'];
 var AGENT_NAMES = { david: 'David', mateo: 'Mateo', chatgpt: 'ChatGPT', claude: 'Claude' };
 
@@ -1241,6 +1265,18 @@ function dayLabel(t) {
 function timeLabel(t) {
   var d = new Date(Number(t));
   return isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+function relativeTimeLabel(t) {
+  var n = Number(t), delta = Math.max(0, Date.now() - n);
+  if (!n || !Number.isFinite(n)) return '';
+  if (delta < 60000) return 'just now';
+  var minutes = Math.floor(delta / 60000);
+  if (minutes < 60) return minutes + 'm ago';
+  var hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h ago';
+  var days = Math.floor(hours / 24);
+  if (days < 7) return days + 'd ago';
+  return new Date(n).toLocaleDateString();
 }
 
 function threadMessages() {
@@ -1309,14 +1345,12 @@ function renderThread() {
     }
     var isDavid = g.author === 'david';
     html += '<div class="' + (isDavid ? 'tgroup david' : 'tgroup agent') + '">';
-    if (!isDavid) {
-      html += '<div class="tauthor"><span class="avatar" style="background:' + agentColor(g.author) + '">' +
-        esc(agentInitials(g.author)) + '</span><span class="aname">' + esc(displayName(g.author)) + '</span></div>';
-    }
+    html += '<div class="tauthor"><span class="avatar" style="background:' + agentColor(g.author) + '">' +
+      esc(agentInitials(g.author)) + '</span><span class="aname">' + esc(displayName(g.author)) + '</span></div>';
     g.items.forEach(function (m) {
       html += '<div class="bubble">' + esc(m.body) +
         (m.task ? '<div class="btask">' + esc(m.task) + '</div>' : '') +
-        '<div class="bts">' + esc(timeLabel(m.ts)) + (m.pending ? ' · sending…' : '') + '</div></div>';
+        '<div class="bts" title="' + esc(ts(m.ts)) + '">' + esc(relativeTimeLabel(m.ts)) + (m.pending ? ' · sending…' : '') + '</div></div>';
     });
     html += '</div>';
   });
@@ -1710,6 +1744,29 @@ function sendChat() {
   });
 }
 
+// Navigation is an enhancement: the existing board/queues/thread stay in place.
+function initHubNavigation() {
+  ['quickTiles', 'mobileTabs'].forEach(function (id) {
+    var root = document.getElementById(id);
+    if (!root) return;
+    root.querySelectorAll('button[data-jump]').forEach(function (b) {
+      b.onclick = function () {
+        var target = b.getAttribute('data-jump');
+        var el = document.getElementById(target);
+        if (!el) return;
+        if (el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        var tabs = document.getElementById('mobileTabs');
+        tabs.querySelectorAll('button[data-jump]').forEach(function (tab) {
+          var active = tab.getAttribute('data-jump') === target;
+          tab.classList.toggle('is-active', active);
+          if (active) tab.setAttribute('aria-current', 'page');
+          else tab.removeAttribute('aria-current');
+        });
+      };
+    });
+  });
+}
+
 // ---- init --------------------------------------------------------------------------
 
 function render() {
@@ -1735,6 +1792,7 @@ document.getElementById('logoutBtn').onclick = function () {
 };
 
 initComposer();
+initHubNavigation();
 loadAll();
 setInterval(function () { if (!document.hidden) loadAll(); }, 15000);
 `;
