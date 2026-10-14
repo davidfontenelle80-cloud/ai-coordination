@@ -329,3 +329,47 @@ describe('Board UX: completed section + thread view', () => {
     }
   });
 });
+
+
+describe('Mobile-first visual polish', () => {
+  it('retains existing queue, task, chat, and token surfaces', () => {
+    for (const id of ['needsDavid', 'needsMateo', 'taskList', 'chatSection',
+        'composerWrap', 'mobileTabs', 'quickTiles', 'tokensScreen']) {
+      assert.ok(DASHBOARD_HTML.includes('id="' + id + '"'), 'missing ' + id);
+    }
+    for (const target of ['needsDavid', 'taskList', 'chatSection', 'activityList']) {
+      assert.ok(DASHBOARD_HTML.includes('data-jump="' + target + '"'), 'missing jump ' + target);
+    }
+    assert.match(DASHBOARD_CSS, /@media \(max-width: 680px\)/);
+    assert.ok(DASHBOARD_JS.includes('initHubNavigation();'));
+  });
+
+  it('puts urgent task cards before routine and FYI without changing task objects', () => {
+    const a = app();
+    a.run("state.tasks = [" +
+      "{task_id:'low',title:'FYI thing',status:'pending',priority:'low'}," +
+      "{task_id:'normal',title:'Routine thing',status:'pending',priority:'normal'}," +
+      "{task_id:'high',title:'Urgent thing',status:'blocked',priority:'high'}" +
+      "]; renderTasks()");
+    const html = a.document.getElementById('taskList').innerHTML;
+    assert.ok(html.indexOf('Urgent thing') < html.indexOf('Routine thing'));
+    assert.ok(html.indexOf('Routine thing') < html.indexOf('FYI thing'));
+    for (const label of ['priority-urgent', 'priority-routine', 'priority-fyi']) {
+      assert.ok(html.includes(label), 'missing priority style ' + label);
+    }
+  });
+
+  it('formats chat times relatively with correct units', () => {
+    const a = app();
+    assert.equal(a.run('relativeTimeLabel(Date.now() - 2 * 60 * 60 * 1000)'), '2h ago');
+    assert.equal(a.run('relativeTimeLabel(Date.now() - 5 * 60 * 1000)'), '5m ago');
+    assert.equal(a.run('relativeTimeLabel(Date.now() - 2 * 24 * 60 * 60 * 1000)'), '2d ago');
+  });
+
+  it('keeps the task screen outside the hidden dashboard after visual changes', () => {
+    const detailIndex = DASHBOARD_HTML.indexOf('<section id="taskDetailScreen"');
+    const prior = DASHBOARD_HTML.slice(DASHBOARD_HTML.indexOf('<div id="dashboardScreen">'), detailIndex);
+    assert.equal([...prior.matchAll(/<\/?div\b[^>]*>/g)].reduce((d, [tag]) =>
+      d + (tag.startsWith('</') ? -1 : 1), 0), 0);
+  });
+});
