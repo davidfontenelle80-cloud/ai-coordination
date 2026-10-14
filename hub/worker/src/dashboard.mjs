@@ -15,7 +15,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f1420">
+<meta name="theme-color" content="#087f83">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="AI Hub">
@@ -30,8 +30,9 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 <div id="dashboardScreen">
 <header>
   <div class="brand">
+    <span class="greeting" id="greeting">Welcome back, David</span>
     <h1>AI Coordination Hub</h1>
-    <span class="sub">David's control tower</span>
+    <span class="sub">Your team, one clear view.</span>
   </div>
   <div class="head-right">
     <span id="principal" class="principal">…</span>
@@ -48,6 +49,12 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     <h2>Needs David <span id="ndCount" class="count"></span></h2>
     <div id="ndList" class="cards"><p class="empty">Loading…</p></div>
   </section>
+
+  <nav id="quickTiles" class="quick-tiles" aria-label="Explore your hub">
+    <button type="button" class="quick-tile tile-tasks" data-jump="taskList"><span class="tile-icon" aria-hidden="true">▦</span><span class="tile-title">Tasks</span><span class="tile-description">See what is moving</span><span class="tile-arrow" aria-hidden="true">↗</span></button>
+    <button type="button" class="quick-tile tile-team" data-jump="chatSection"><span class="tile-icon" aria-hidden="true">◎</span><span class="tile-title">Team chat</span><span class="tile-description">Talk with the agents</span><span class="tile-arrow" aria-hidden="true">↗</span></button>
+    <button type="button" class="quick-tile tile-activity" data-jump="activityList"><span class="tile-icon" aria-hidden="true">◷</span><span class="tile-title">Activity</span><span class="tile-description">Catch up at a glance</span><span class="tile-arrow" aria-hidden="true">↗</span></button>
+  </nav>
 
   <section id="needsMateo" class="queue queue-mateo">
     <h2>Needs Mateo <span id="nmCount" class="count"></span></h2>
@@ -103,6 +110,12 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     <button id="cmdSend" class="sendbtn" title="Send" aria-label="Send">➤</button>
   </div>
   <div id="cmdStatus" class="cmdstatus" role="status"></div>
+  <nav id="mobileTabs" class="mobile-tabs" aria-label="Hub navigation">
+    <button type="button" class="mobile-tab is-active" data-jump="needsDavid" aria-current="page"><span aria-hidden="true">⌂</span>Home</button>
+    <button type="button" class="mobile-tab" data-jump="taskList"><span aria-hidden="true">▦</span>Tasks</button>
+    <button type="button" class="mobile-tab" data-jump="chatSection"><span aria-hidden="true">◎</span>Team</button>
+    <button type="button" class="mobile-tab" data-jump="activityList"><span aria-hidden="true">◷</span>Activity</button>
+  </nav>
 </div>
 
 </div>
@@ -408,6 +421,164 @@ pre.ev { background: var(--bg); border: 1px solid var(--line); border-radius: 6p
 #composerWrap .cmdstatus:empty { display: none; }
 #composerWrap .cmdstatus.ok { color: var(--mateo); }
 #composerWrap .cmdstatus.err { color: var(--bad); }
+
+/* Mobile-first visual polish (October 2026). Keep all existing sections and actions. */
+:root {
+  --bg: #f5f9f7; --panel: #ffffff; --panel2: #eef7f5;
+  --line: #dceae7; --text: #183c42; --muted: #607980;
+  --accent: #087f83; --david: #087f83; --mateo: #087f83;
+  --warn: #bd780b; --bad: #b83e44; --radius: 18px;
+  --gold: #f8c750; --gold-soft: #fff5d8;
+  --shadow: 0 6px 24px rgba(22, 75, 80, .065);
+}
+body { background: var(--bg); color: var(--text); }
+header:not(.screen-head) {
+  background: linear-gradient(135deg, #07868a, #086a76);
+  border-bottom: none; color: #fff; border-radius: 0 0 24px 24px;
+  padding: 22px 22px 20px; box-shadow: 0 8px 24px rgba(4, 91, 96, .15);
+}
+.greeting { display: block; font-size: 14px; font-weight: 500; color: #e4fbf6; margin-bottom: 2px; }
+.brand h1 { font-size: 23px; font-weight: 800; letter-spacing: -.025em; }
+.brand .sub, header:not(.screen-head) .principal { color: #d5eeeb; }
+header:not(.screen-head) .chip { background: rgba(255,255,255,.13); border-color: rgba(255,255,255,.18); color: #eefbf8; }
+header:not(.screen-head) .chip b { color: #fff; }
+header:not(.screen-head) button { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.24); color: #fff; }
+main { padding-top: 20px; }
+.queue { margin-bottom: 20px; }
+.queue h2, .panel h2, .chat-section h2 { font-size: 19px; font-weight: 800; letter-spacing: -.025em; color: var(--text); }
+.queue-david { background: #e9f7f4; padding: 18px; border-radius: 22px; border: 1px solid #cfece6; }
+.queue-david h2 { color: #086e73; }
+.queue-david h2::before { content: '✦'; display: inline-grid; place-items: center; width: 30px; height: 30px; background: var(--gold); color: #744600; border-radius: 10px; font-size: 17px; }
+.queue-mateo { padding: 2px 4px; }
+.count { background: #e9f4f0; color: #235c62; border: none; font-weight: 750; padding: 3px 10px; }
+.cards { grid-template-columns: repeat(auto-fit,minmax(min(100%,280px),1fr)); gap: 12px; }
+.card, .taskrow, .act, .thread-scroll, .tokrow {
+  background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.card { padding: 16px; }
+.card h3 { font-size: 15px; line-height: 1.35; }
+.card p { font-size: 13px; }
+.card .actions button { min-height: 44px; padding: 10px 15px; }
+button { transition: border-color .15s, background-color .15s, transform .15s; }
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible { outline: 3px solid #e9aa1b; outline-offset: 2px; }
+button.primary { color: #fff; }
+button.danger { background: #fff6f5; }
+button:hover { border-color: #2faaa9; }
+.empty { color: #627b7f; line-height: 1.6; }
+.queue-david .empty { background: #fff; border-radius: 15px; padding: 17px; border: 1px dashed #a4d1c9; }
+.decision-tag { color: #97600e; font-weight: 800; font-size: 11px; letter-spacing: .07em; text-transform: uppercase; margin-bottom: 9px; }
+.decision-tag::before { content: '●'; font-size: 9px; margin-right: 7px; color: #de9a21; }
+.decision-card.priority-urgent { border-left: 5px solid #d35452; }
+.decision-card.priority-routine { border-left: 5px solid var(--gold); }
+.decision-card.priority-fyi { border-left: 5px solid #6bbab1; }
+.quick-tiles { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; margin: 16px 0 26px; }
+.quick-tile {
+  min-height: 126px; padding: 16px; border-radius: 20px; text-align: left;
+  display: flex; flex-direction: column; align-items: flex-start; position: relative;
+  border: 1px solid transparent; box-shadow: var(--shadow); overflow: hidden;
+}
+.tile-tasks { background: #0b8790; color: #fff; }
+.tile-team { background: #f8c750; color: #4e3910; }
+.tile-activity { background: #e5effa; color: #235c88; }
+.tile-icon { font-size: 26px; line-height: 1; margin-bottom: auto; }
+.tile-title { font-size: 16px; font-weight: 850; margin-top: 12px; }
+.tile-description { font-size: 11px; opacity: .83; margin-top: 3px; }
+.tile-arrow { position: absolute; right: 15px; top: 12px; font-size: 19px; }
+.panel { min-width: 0; }
+.filters select { min-height: 43px; flex: 1; min-width: 0; }
+.tasklist { gap: 10px; }
+.taskrow {
+  min-height: 73px; padding: 12px 14px 12px 17px; border-left: 5px solid #59b6ac;
+  position: relative; grid-template-columns: minmax(0,1fr) auto;
+}
+.taskrow .t { font-size: 15px; font-weight: 760; line-height: 1.35; }
+.taskrow .meta { font-size: 11px; }
+.taskrow.priority-urgent { border-left-color: #d95a50; background: #fffaf8; }
+.taskrow.priority-routine { border-left-color: #efb936; }
+.taskrow.priority-fyi { border-left-color: #61b9b0; }
+.pill { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 3px 8px; }
+.pill.pending,.pill.claimed { background: #e5f5f3; color: #066f77; border-color: #b7dfd8; }
+.pill.under-review,.pill.in-progress { background: #fff2ca; color: #805a00; border-color: #ffe2a1; }
+.pill.blocked { background: #fff0ef; color: #ae343b; border-color: #f3c8c6; }
+.pill.completed { background: #eaf9ed; color: #267a4f; border-color: #c0e5cf; }
+.priority-hint { font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; margin-left: 7px; }
+.priority-urgent .priority-hint { color: #b83e44; }
+.priority-fyi .priority-hint { color: #54837d; }
+.priority-routine .priority-hint { color: #9b730f; }
+.alert { background: var(--gold-soft); color: #825305; border: 1px solid #f4db9a; }
+.alert.bad { background: #fff2f1; color: #a8393c; border-color: #efc2bd; }
+.thread-scroll { padding: 14px; }
+.chat-section h2 { color: #0b7477; }
+.daydiv { display: inline-block; align-self: center; background: #eaf4f1; padding: 5px 13px; border-radius: 999px; }
+.tgroup { margin: 10px 0; }
+.tauthor { gap: 8px; }
+.avatar { width: 32px; height: 32px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,.08); }
+.bubble { max-width: 88%; padding: 11px 14px; border-radius: 17px; }
+.tgroup.agent .bubble { background: #f2f7f5; }
+.tgroup.david .bubble { background: #0b868a; color: white; }
+.tgroup.david .tauthor { align-self: flex-end; flex-direction: row-reverse; }
+.tgroup.david .aname { color: #417c7f; }
+.bts { font-size: 11px; opacity: .7; }
+.detail-body .sec { background: #fff; padding: 15px; border-radius: 17px; border: 1px solid var(--line); }
+.detail-body .sec > h4 { color: #0a777b; }
+.detail-body .sec:has(.msg) { background: #f4f9f7; }
+.msg { background: white; border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin: 10px 0; }
+.msg .who { display: flex; align-items: center; gap: 8px; font-weight: 750; color: #0a7179; margin-bottom: 7px; }
+.msg .avatar { width: 27px; height: 27px; }
+.msg .msgtext { font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg .reltime { font-weight: 500; color: var(--muted); margin-left: auto; }
+.evline { border-color: #abd8d0; }
+#taskDetailScreen .screen-head { background: #087f83; color: white; }
+#taskDetailScreen .screen-head button { background: #e8f8f4; color: #075f64; }
+.screen-head h1 { color: inherit; }
+#composerWrap { background: #fff; border-color: #d2e3df; box-shadow: 0 -5px 25px rgba(16,72,72,.07); }
+#cmdInput { background: #f7fbf9; }
+.sendbtn { color: #fff; }
+.mobile-tabs { display: none; }
+@media (max-width: 680px) {
+  header:not(.screen-head) { position: relative; top: auto; padding: calc(18px + env(safe-area-inset-top)) 17px 16px; border-radius: 0 0 23px 23px; gap: 12px; }
+  header:not(.screen-head) .head-right { gap: 7px; width: 100%; }
+  header:not(.screen-head) .principal { display: none; }
+  header:not(.screen-head) .stats { display: flex; flex-wrap: nowrap; max-width: calc(100% - 97px); overflow-x: auto; scrollbar-width: none; }
+  header:not(.screen-head) .chip { font-size: 11px; padding: 4px 9px; }
+  header:not(.screen-head) #refreshBtn,header:not(.screen-head) #logoutBtn { min-height: 39px; padding: 8px 10px; }
+  .brand h1 { font-size: 19px; }
+  .greeting { font-size: 16px; }
+  main { padding: 18px 14px 20px; }
+  .queue-david { padding: 16px; margin: 0 0 16px; }
+  .queue h2,.panel h2 { font-size: 18px; }
+  .quick-tiles { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-bottom: 25px; }
+  .quick-tile { padding: 12px 10px; min-height: 116px; border-radius: 16px; }
+  .tile-title { font-size: 13px; }
+  .tile-description { font-size: 10px; line-height: 1.3; }
+  .tile-icon { font-size: 22px; }
+  .tile-arrow { top: 8px; right: 10px; font-size: 15px; }
+  .grid { gap: 10px; }
+  .card { padding: 15px; }
+  .tasklist { max-height: none; }
+  .taskrow { min-height: 76px; padding: 14px 12px 14px 15px; }
+  .filters select { font-size: 13px; }
+  .mobile-tabs {
+    display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); border-top: 1px solid #e1ebe8;
+    margin: 8px -12px calc(-8px - env(safe-area-inset-bottom)); padding: 5px 7px calc(5px + env(safe-area-inset-bottom));
+    background: #fff;
+  }
+  .mobile-tab {
+    border: none; background: transparent; color: #608184; min-height: 47px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1px; font-size: 10px; font-weight: 700; border-radius: 12px; padding: 2px;
+  }
+  .mobile-tab span { font-size: 22px; line-height: 1.1; font-weight: 600; }
+  .mobile-tab.is-active { background: #e8f5f2; color: #05787d; }
+  #composerWrap { padding-top: 7px; }
+  #cmdInput { min-height: 42px; }
+  body { padding-bottom: calc(var(--composer-h, 170px) + 24px); }
+  .thread-scroll { max-height: 60dvh; }
+  .bubble { max-width: 90%; }
+}
+@media (prefers-reduced-motion: reduce) { button { transition: none; } }
+
 `;
 
 export const DASHBOARD_JS = `
